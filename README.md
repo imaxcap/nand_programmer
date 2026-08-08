@@ -88,7 +88,7 @@ cmake --build build --parallel
 ctest --test-dir build --output-on-failure
 ```
 
-The executable and database are placed under `build/`:
+The executable and database are placed together under `build/`:
 
 ```sh
 ./build/nandprog --device /dev/ttyACM0 probe
@@ -108,9 +108,11 @@ Then run:
 .\build\Release\nandprog.exe --device COM3 probe
 ```
 
-The chip database search order is `--db PATH`, `data/` beside the executable,
-the installation `share/nandprog/` directory, and the source-tree `data/`
-directory.
+Installed packages place `nandprog` (or `nandprog.exe`) and
+`nando_parallel_chip_db.csv` in the same `bin/` directory. The database search
+order is `--db PATH`, beside the executable, the legacy `data/` beside the
+executable, the legacy installation `share/nandprog/` directory, and the
+source-tree `data/` directory.
 
 ## Firmware and hardware
 

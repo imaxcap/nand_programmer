@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <filesystem>
 #include <iostream>
 #include <sstream>
 #include <string>
@@ -97,9 +98,15 @@ void test_protocol_encoding() {
 }
 
 void test_database() {
+    const auto database_path = std::filesystem::path(NANDPROG_TEST_DB);
+    const auto adjacent_database = nandprog::find_database(
+        {}, database_path.parent_path() / "nandprog-test-executable");
+    require(std::filesystem::equivalent(adjacent_database, database_path),
+            "database lookup beside executable");
+
     nandprog::ChipDatabase database;
-    database.load(NANDPROG_TEST_DB);
-    require(database.chips().size() == 19, "parallel chip count");
+    database.load(database_path);
+    require(database.chips().size() == 20, "parallel chip count");
     const auto *chip = database.find_by_name("MT29F2G08ABAEA");
     require(chip != nullptr, "Micron chip lookup");
     require(chip->raw_page_size() == 2112, "raw page geometry");
@@ -115,6 +122,20 @@ void test_database() {
         {44, 218, 144, 149, 0xff, 0x12, 0x34, 0x56}};
     require(database.find_by_id(extended_id) == chip,
             "extra raw ID bytes must not break five-column CSV matching");
+
+    nandprog::protocol::ChipId mxic_id{
+        {0xc2, 0xa1, 0x80, 0x15, 0x02, 0x00}};
+    const auto *mxic = database.find_by_id(mxic_id);
+    require(mxic != nullptr && mxic->name == "MX30UF1G18AC",
+            "MX30UF1G18AC ID lookup");
+    require(mxic->page_size == 2048 && mxic->spare_size == 64 &&
+                mxic->block_size == 128 * 1024 &&
+                mxic->total_size == 128ULL * 1024 * 1024,
+            "MX30UF1G18AC geometry");
+    const auto mxic_hal = mxic->hal_configuration();
+    require(mxic_hal[6] == 2 && mxic_hal[7] == 2 && mxic_hal[8] == 0x00 &&
+                mxic_hal[9] == 0x30,
+            "MX30UF1G18AC address cycles and read commands");
 }
 
 void test_variable_length_id() {

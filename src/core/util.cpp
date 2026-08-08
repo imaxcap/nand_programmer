@@ -91,6 +91,7 @@ std::filesystem::path find_database(const std::filesystem::path &requested,
 
     const auto executable_dir = std::filesystem::absolute(executable).parent_path();
     const std::vector<std::filesystem::path> candidates = {
+        executable_dir / "nando_parallel_chip_db.csv",
         executable_dir / "data" / "nando_parallel_chip_db.csv",
         executable_dir.parent_path() / "share" / "nandprog" /
             "nando_parallel_chip_db.csv",

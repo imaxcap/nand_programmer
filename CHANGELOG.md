@@ -6,6 +6,7 @@
 - Kept the STM32 3.5.0 firmware protocol unchanged.
 - `erase` now executes immediately in REPL and one-shot modes. The confirmation
   prompt and `--yes` option were removed.
+- Packages now place the executable and parallel NAND CSV together in `bin/`.
 
 ### Added
 - One-shot commands and an interactive U-Boot-style REPL.
@@ -17,6 +18,7 @@
   `write.qpic FILE [NAND-OFFSET] --ecc bch4|bch8`.
 - Protocol, database, raw-write identity, QPIC reference-vector, layout, and
   transport tests.
+- MX30UF1G18AC 128 MiB (`C2 A1 80 15 02`) database support.
 
 ## [1.0.0] - 2018-11-25
 - Initial release. Basic NAND operations support.

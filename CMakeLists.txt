@@ -38,16 +38,15 @@ add_executable(nandprog
 target_link_libraries(nandprog PRIVATE nandprog_core)
 
 add_custom_command(TARGET nandprog POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:nandprog>/data"
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
         "${CMAKE_CURRENT_SOURCE_DIR}/data/nando_parallel_chip_db.csv"
-        "$<TARGET_FILE_DIR:nandprog>/data/nando_parallel_chip_db.csv"
+        "$<TARGET_FILE_DIR:nandprog>/nando_parallel_chip_db.csv"
 )
 
 include(GNUInstallDirs)
 install(TARGETS nandprog RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 install(FILES data/nando_parallel_chip_db.csv
-    DESTINATION ${CMAKE_INSTALL_DATADIR}/nandprog)
+    DESTINATION ${CMAKE_INSTALL_BINDIR})
 
 if(NANDPROG_BUILD_TESTS)
     enable_testing()
