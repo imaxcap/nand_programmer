@@ -1,0 +1,162 @@
+#include "nandprog/protocol.hpp"
+
+#include "nandprog/error.hpp"
+
+#include <sstream>
+
+namespace nandprog::protocol {
+namespace {
+
+void append_u32(std::vector<std::uint8_t> &buffer, std::uint32_t value) {
+    for (unsigned shift = 0; shift < 32; shift += 8)
+        buffer.push_back(static_cast<std::uint8_t>(value >> shift));
+}
+
+void append_u64(std::vector<std::uint8_t> &buffer, std::uint64_t value) {
+    for (unsigned shift = 0; shift < 64; shift += 8)
+        buffer.push_back(static_cast<std::uint8_t>(value >> shift));
+}
+
+std::size_t status_payload_size(std::uint8_t info) {
+    switch (static_cast<Status>(info)) {
+    case Status::ok:
+        return 0;
+    case Status::error:
+    case Status::bad_block:
+    case Status::write_ack:
+    case Status::bad_block_skip:
+        return 12;
+    case Status::progress:
+        return 8;
+    }
+    throw Error("Unknown response status " + std::to_string(info));
+}
+
+} // namespace
+
+std::uint8_t Flags::encode() const noexcept {
+    return static_cast<std::uint8_t>((skip_bad ? 1U : 0U) |
+                                     (include_spare ? 2U : 0U) |
+                                     (enable_hardware_ecc ? 4U : 0U));
+}
+
+std::vector<std::uint8_t> encode_simple(Command command) {
+    return {static_cast<std::uint8_t>(command)};
+}
+
+std::vector<std::uint8_t> encode_range(Command command, std::uint64_t address,
+                                       std::uint64_t length, Flags flags) {
+    std::vector<std::uint8_t> result;
+    result.reserve(18);
+    result.push_back(static_cast<std::uint8_t>(command));
+    append_u64(result, address);
+    append_u64(result, length);
+    result.push_back(flags.encode());
+    return result;
+}
+
+std::vector<std::uint8_t> encode_write_data(const std::uint8_t *data,
+                                            std::size_t size) {
+    if (size == 0 || size > max_write_payload)
+        throw Error("Invalid write payload size " + std::to_string(size));
+
+    std::vector<std::uint8_t> result;
+    result.reserve(size + 2);
+    result.push_back(static_cast<std::uint8_t>(Command::write_data));
+    result.push_back(static_cast<std::uint8_t>(size));
+    result.insert(result.end(), data, data + size);
+    return result;
+}
+
+std::vector<std::uint8_t> encode_configure(
+    std::uint8_t hal, std::uint32_t page_size, std::uint32_t block_size,
+    std::uint64_t total_size, std::uint32_t spare_size,
+    std::uint8_t bad_block_mark_offset,
+    const std::vector<std::uint8_t> &hal_configuration) {
+    std::vector<std::uint8_t> result;
+    result.reserve(23 + hal_configuration.size());
+    result.push_back(static_cast<std::uint8_t>(Command::configure));
+    result.push_back(hal);
+    append_u32(result, page_size);
+    append_u32(result, block_size);
+    append_u64(result, total_size);
+    append_u32(result, spare_size);
+    result.push_back(bad_block_mark_offset);
+    result.insert(result.end(), hal_configuration.begin(),
+                  hal_configuration.end());
+    if (result.size() > max_packet_size)
+        throw Error("Chip configuration exceeds the 64-byte protocol packet");
+    return result;
+}
+
+Response read_response(Transport &transport, unsigned timeout_ms) {
+    std::uint8_t header[2]{};
+    transport.read_exact(header, sizeof(header), timeout_ms);
+
+    Response response;
+    if (header[0] > static_cast<std::uint8_t>(ResponseCode::status))
+        throw Error("Unknown response code " + std::to_string(header[0]));
+    response.code = static_cast<ResponseCode>(header[0]);
+    response.info = header[1];
+
+    const std::size_t payload_size = response.code == ResponseCode::data
+                                         ? response.info
+                                         : status_payload_size(response.info);
+    response.payload.resize(payload_size);
+    if (payload_size != 0)
+        transport.read_exact(response.payload.data(), payload_size, timeout_ms);
+    return response;
+}
+
+std::uint64_t decode_u64(const std::uint8_t *data) {
+    std::uint64_t result = 0;
+    for (unsigned index = 0; index < 8; ++index)
+        result |= static_cast<std::uint64_t>(data[index]) << (index * 8);
+    return result;
+}
+
+std::uint32_t decode_u32(const std::uint8_t *data) {
+    std::uint32_t result = 0;
+    for (unsigned index = 0; index < 4; ++index)
+        result |= static_cast<std::uint32_t>(data[index]) << (index * 8);
+    return result;
+}
+
+std::string firmware_error_message(std::uint8_t code) {
+    switch (code) {
+    case 1:
+        return "Internal firmware error";
+    case 100:
+        return "Operation address exceeded chip size";
+    case 101:
+        return "Operation address is invalid";
+    case 102:
+        return "Operation address is not aligned to page/block size";
+    case 103:
+        return "Failed to write NAND";
+    case 104:
+        return "Failed to read NAND";
+    case 105:
+        return "Failed to erase NAND";
+    case 106:
+        return "Programmer is not configured with chip parameters";
+    case 107:
+        return "Command data size is invalid";
+    case 108:
+        return "Invalid command";
+    case 109:
+        return "Firmware buffer overflow";
+    case 110:
+        return "Length is not page/block aligned";
+    case 111:
+        return "Length exceeded chip size";
+    case 112:
+        return "Invalid data length";
+    case 113:
+        return "Bad-block table overflow";
+    default:
+        return "Unknown firmware error";
+    }
+}
+
+} // namespace nandprog::protocol

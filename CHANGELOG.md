@@ -1,3 +1,17 @@
+## [4.0.0] - Unreleased
+### Changed
+- Replaced the Qt GUI host application with a C++17 command-line tool.
+- Replaced Qt and Boost host dependencies with native Linux and Windows serial
+  transports.
+- Kept the STM32 3.5.0 firmware protocol unchanged.
+
+### Added
+- One-shot commands and an interactive U-Boot-style REPL.
+- `probe`, `info`, `read`, `read.raw`, `erase`, `write`, `write.raw`, and
+  `verify` commands.
+- A reserved `write.qpic` command for future Qualcomm NAND layout support.
+- Protocol, database, and raw-write identity tests.
+
 ## [1.0.0] - 2018-11-25
 - Initial release. Basic NAND operations support.
 ## [2.0.0] - 2019-03-09
