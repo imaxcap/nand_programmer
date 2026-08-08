@@ -1,6 +1,7 @@
 #include "nandprog/commands.hpp"
 
 #include "nandprog/error.hpp"
+#include "nandprog/qpic.hpp"
 #include "nandprog/util.hpp"
 
 #include <algorithm>
@@ -103,7 +104,7 @@ CommandShell::CommandShell(GlobalOptions options,
 }
 
 int CommandShell::run_repl() {
-    std::cout << "nandprog 0.1.1 - type 'help' for commands\n";
+    std::cout << "nandprog 0.2.0 - type 'help' for commands\n";
     std::string line;
     while (true) {
         std::cout << "nand> " << std::flush;
@@ -117,7 +118,7 @@ int CommandShell::run_repl() {
                 continue;
             if (arguments.front() == "exit" || arguments.front() == "quit")
                 return 0;
-            (void)execute(arguments, true);
+            (void)execute(arguments);
         } catch (const VerifyMismatch &error) {
             std::cerr << "verify failed: " << error.what() << '\n';
         } catch (const Error &error) {
@@ -128,8 +129,7 @@ int CommandShell::run_repl() {
     }
 }
 
-int CommandShell::execute(const std::vector<std::string> &arguments,
-                          bool interactive) {
+int CommandShell::execute(const std::vector<std::string> &arguments) {
     if (arguments.empty())
         return 0;
     const std::string &command = arguments.front();
@@ -147,7 +147,7 @@ int CommandShell::execute(const std::vector<std::string> &arguments,
     else if (command == "read.raw")
         command_read(arguments, true);
     else if (command == "erase")
-        command_erase(arguments, interactive);
+        command_erase(arguments);
     else if (command == "write")
         command_write(arguments, false);
     else if (command == "write.raw")
@@ -155,7 +155,7 @@ int CommandShell::execute(const std::vector<std::string> &arguments,
     else if (command == "verify" || command == "verify.raw")
         command_verify(arguments);
     else if (command == "write.qpic")
-        throw Error("write.qpic is reserved but QPIC ECC/layout is not implemented");
+        command_write_qpic(arguments);
     else if (command == "exit" || command == "quit")
         return 0;
     else
@@ -310,42 +310,24 @@ void CommandShell::command_read(const std::vector<std::string> &arguments,
     std::cout << "Read " << length << " bytes to " << arguments[1] << '\n';
 }
 
-void CommandShell::command_erase(const std::vector<std::string> &arguments,
-                                 bool interactive) {
-    bool confirmed = false;
-    std::vector<std::string> values;
-    values.push_back("erase");
-    for (std::size_t index = 1; index < arguments.size(); ++index) {
-        if (arguments[index] == "--yes")
-            confirmed = true;
-        else
-            values.push_back(arguments[index]);
-    }
-    if (!((values.size() == 2 && values[1] == "all") || values.size() == 3))
-        throw Error("Usage: erase all [--yes] | erase OFFSET LENGTH [--yes]");
+void CommandShell::command_erase(const std::vector<std::string> &arguments) {
+    const bool erase_all = arguments.size() == 2 && arguments[1] == "all";
+    const bool erase_range =
+        arguments.size() == 3 && arguments[1] != "all";
+    if (!erase_all && !erase_range)
+        throw Error("Usage: erase all | erase OFFSET LENGTH");
     ensure_probe();
 
-    const std::uint64_t address = values[1] == "all" ? 0 : parse_number(values[1]);
-    const std::uint64_t length = values[1] == "all" ? chip_->total_size
-                                                     : parse_number(values[2]);
+    const std::uint64_t address =
+        arguments[1] == "all" ? 0 : parse_number(arguments[1]);
+    const std::uint64_t length = arguments[1] == "all"
+                                     ? chip_->total_size
+                                     : parse_number(arguments[2]);
     if (address % chip_->block_size != 0 || length == 0 ||
         length % chip_->block_size != 0)
         throw Error("Erase offset and length must be block aligned");
     if (address >= chip_->total_size || length > chip_->total_size - address)
         throw Error("Erase range is outside the chip");
-
-    if (!confirmed && interactive) {
-        std::cout << "Erase " << hex_number(length) << " bytes at "
-                  << hex_number(address) << "? Type 'yes': " << std::flush;
-        std::string answer;
-        if (!std::getline(std::cin, answer) || answer != "yes") {
-            std::cout << "Erase cancelled\n";
-            return;
-        }
-        confirmed = true;
-    }
-    if (!confirmed)
-        throw Error("Destructive erase requires --yes in one-shot mode");
 
     ProgressDisplay progress("erase", length);
     protocol::Flags flags;
@@ -409,6 +391,99 @@ void CommandShell::command_write(const std::vector<std::string> &arguments,
                   print_bad_block);
     progress.finish();
     std::cout << "Wrote " << length << " bytes from " << path.string() << '\n';
+}
+
+void CommandShell::command_write_qpic(
+    const std::vector<std::string> &arguments) {
+    if (arguments.size() < 4)
+        throw Error("Usage: write.qpic FILE [NAND-OFFSET] --ecc bch4|bch8");
+
+    std::optional<qpic::EccMode> ecc_mode;
+    std::optional<std::uint64_t> nand_offset;
+    for (std::size_t index = 2; index < arguments.size(); ++index) {
+        if (arguments[index] == "--ecc") {
+            if (ecc_mode || ++index >= arguments.size())
+                throw Error("Usage: write.qpic FILE [NAND-OFFSET] --ecc bch4|bch8");
+            if (arguments[index] == "bch4")
+                ecc_mode = qpic::EccMode::bch4;
+            else if (arguments[index] == "bch8")
+                ecc_mode = qpic::EccMode::bch8;
+            else
+                throw Error("QPIC ECC must be bch4 or bch8");
+        } else if (arguments[index].rfind("--", 0) == 0) {
+            throw Error("Unknown write.qpic option: " + arguments[index]);
+        } else {
+            if (nand_offset)
+                throw Error("write.qpic accepts only one NAND offset");
+            nand_offset = parse_number(arguments[index]);
+        }
+    }
+    if (!ecc_mode)
+        throw Error("write.qpic requires --ecc bch4 or --ecc bch8");
+
+    ensure_probe();
+    const std::filesystem::path path = arguments[1];
+    const std::uint64_t input_size = input_file_size(path);
+    const std::uint64_t data_address = nand_offset.value_or(0);
+    if (data_address % chip_->page_size != 0)
+        throw Error("QPIC NAND offset must be data-page aligned");
+
+    const qpic::PageEncoder encoder(chip_->page_size, chip_->spare_size,
+                                    *ecc_mode);
+    const std::uint64_t page_count =
+        rounded_up(input_size, chip_->page_size) / chip_->page_size;
+    const std::uint64_t start_page = data_address / chip_->page_size;
+    if (start_page >= chip_->page_count() ||
+        page_count > chip_->page_count() - start_page)
+        throw Error("QPIC image does not fit in the selected chip range");
+
+    const std::uint64_t raw_page_size = encoder.raw_page_size();
+    const std::uint64_t raw_address =
+        checked_product(start_page, raw_page_size, "QPIC raw write address");
+    const std::uint64_t raw_length =
+        checked_product(page_count, raw_page_size, "QPIC raw write length");
+
+    std::ifstream input(path, std::ios::binary);
+    if (!input)
+        throw Error("Failed to open input file: " + path.string());
+    std::uint64_t remaining = input_size;
+    ProgressDisplay progress("write.qpic", raw_length);
+    protocol::Flags flags;
+    flags.skip_bad = true;
+    flags.include_spare = true;
+    flags.enable_hardware_ecc = false;
+
+    if (firmware_version_.major == 3 && firmware_version_.minor <= 5) {
+        std::cerr << "warning: firmware 3.5.x acknowledges write-end before "
+                     "checking the final NAND busy/status; read.raw and compare "
+                     "the result\n";
+    }
+
+    client_.write_pages(
+        [&](std::uint8_t *raw_page, std::size_t size) {
+            const std::size_t data_size = static_cast<std::size_t>(
+                std::min<std::uint64_t>(remaining, chip_->page_size));
+            std::vector<std::uint8_t> data(data_size);
+            input.read(reinterpret_cast<char *>(data.data()),
+                       static_cast<std::streamsize>(data.size()));
+            if (input.bad() || input.gcount() !=
+                                   static_cast<std::streamsize>(data.size()))
+                throw Error("Failed to read input file during QPIC write");
+            const auto encoded = encoder.encode(data.data(), data.size());
+            if (encoded.size() != size)
+                throw Error("Internal QPIC raw page size mismatch");
+            std::copy(encoded.begin(), encoded.end(), raw_page);
+            remaining -= data_size;
+        },
+        raw_address, raw_length, static_cast<std::uint32_t>(raw_page_size),
+        flags,
+        [&progress](std::uint64_t value) { progress.update(value); },
+        print_bad_block);
+    progress.finish();
+    std::cout << "Wrote " << input_size << " data bytes as QPIC "
+              << (*ecc_mode == qpic::EccMode::bch4 ? "BCH4" : "BCH8")
+              << " (" << raw_length << " raw bytes) at NAND offset "
+              << hex_number(data_address) << '\n';
 }
 
 void CommandShell::command_verify(const std::vector<std::string> &arguments) {
@@ -512,15 +587,16 @@ void CommandShell::print_help() {
         << "  info                                      show active NAND geometry\n"
         << "  read FILE [OFFSET] [LENGTH]               read data area\n"
         << "  read.raw FILE [START-PAGE] [PAGE-COUNT]   read data+OOB verbatim\n"
-        << "  erase all [--yes]                         erase the complete NAND\n"
-        << "  erase OFFSET LENGTH [--yes]               erase block-aligned range\n"
+        << "  erase all                                 erase the complete NAND immediately\n"
+        << "  erase OFFSET LENGTH                       erase a block-aligned range immediately\n"
         << "  write FILE [OFFSET]                       write data, pad tail with FF\n"
         << "  write.raw FILE [START-PAGE]               write data+OOB verbatim\n"
         << "  verify FILE [OFFSET] [--raw]              stream-compare NAND to file\n"
-        << "  write.qpic ...                            reserved for future QPIC ECC\n"
+        << "  write.qpic FILE [NAND-OFFSET] --ecc MODE  write QPIC BCH4/BCH8 layout\n"
         << "  help                                      show this help\n"
         << "  exit                                      leave the REPL\n"
-        << "Numbers accept decimal, 0x hexadecimal, and K/M/G suffixes.\n";
+        << "Numbers accept decimal, 0x hexadecimal, and K/M/G suffixes.\n"
+        << "Write commands never erase NAND automatically.\n";
 }
 
 } // namespace nandprog

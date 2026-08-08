@@ -19,6 +19,7 @@ struct BadBlockEvent {
 };
 
 using DataCallback = std::function<void(const std::uint8_t *, std::size_t)>;
+using PageProvider = std::function<void(std::uint8_t *, std::size_t)>;
 using ProgressCallback = std::function<void(std::uint64_t)>;
 using BadBlockCallback = std::function<void(const BadBlockEvent &)>;
 
@@ -45,6 +46,12 @@ public:
                protocol::Flags flags,
                const ProgressCallback &on_progress = {},
                const BadBlockCallback &on_bad_block = {});
+    void write_pages(const PageProvider &provide_page, std::uint64_t address,
+                     std::uint64_t length,
+                     std::uint32_t transfer_page_size,
+                     protocol::Flags flags,
+                     const ProgressCallback &on_progress = {},
+                     const BadBlockCallback &on_bad_block = {});
 
 private:
     Transport &transport_;

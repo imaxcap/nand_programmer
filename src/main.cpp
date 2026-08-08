@@ -51,7 +51,7 @@ int main(int argc, char **argv) {
                     throw nandprog::Error("--chip requires a value");
                 options.forced_chip = argv[index];
             } else if (command.empty() && argument == "--version") {
-                std::cout << "nandprog 0.1.1\n";
+                std::cout << "nandprog 0.2.0\n";
                 return 0;
             } else if (command.empty() && (argument == "-h" || argument == "--help")) {
                 print_global_help();
@@ -68,7 +68,7 @@ int main(int argc, char **argv) {
                                      nandprog::make_serial_transport());
         if (command.empty())
             return shell.run_repl();
-        return shell.execute(command, false);
+        return shell.execute(command);
     } catch (const nandprog::VerifyMismatch &error) {
         std::cerr << "verify failed: " << error.what() << '\n';
         return 5;

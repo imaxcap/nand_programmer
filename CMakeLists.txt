@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.16)
 
-project(nandprog VERSION 0.1.1 LANGUAGES CXX)
+project(nandprog VERSION 0.2.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -13,6 +13,7 @@ add_library(nandprog_core
     src/core/nand_client.cpp
     src/core/protocol.cpp
     src/core/util.cpp
+    src/qpic/qpic.cpp
 )
 
 if(WIN32)

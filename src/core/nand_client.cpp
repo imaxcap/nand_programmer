@@ -165,9 +165,31 @@ void NandClient::write(std::istream &input, std::uint64_t address,
                        protocol::Flags flags,
                        const ProgressCallback &on_progress,
                        const BadBlockCallback &on_bad_block) {
+    write_pages(
+        [&input](std::uint8_t *page, std::size_t size) {
+            std::fill_n(page, size, 0xff);
+            input.read(reinterpret_cast<char *>(page),
+                       static_cast<std::streamsize>(size));
+            const std::streamsize input_bytes = input.gcount();
+            if (input.bad())
+                throw Error("Failed to read input file during NAND write");
+            if (input_bytes == 0)
+                throw Error("Input file ended before the requested write length");
+        },
+        address, length, transfer_page_size, flags, on_progress, on_bad_block);
+}
+
+void NandClient::write_pages(const PageProvider &provide_page,
+                             std::uint64_t address, std::uint64_t length,
+                             std::uint32_t transfer_page_size,
+                             protocol::Flags flags,
+                             const ProgressCallback &on_progress,
+                             const BadBlockCallback &on_bad_block) {
     if (transfer_page_size == 0 || length == 0 ||
         length % transfer_page_size != 0)
         throw Error("Write length must be a non-zero multiple of page size");
+    if (!provide_page)
+        throw Error("NAND write page provider is missing");
 
     transport_.write_packet(
         protocol::encode_range(protocol::Command::write_start, address, length,
@@ -178,14 +200,7 @@ void NandClient::write(std::istream &input, std::uint64_t address,
     std::vector<std::uint8_t> page(transfer_page_size);
     std::uint64_t transferred = 0;
     while (transferred < length) {
-        std::fill(page.begin(), page.end(), 0xff);
-        input.read(reinterpret_cast<char *>(page.data()),
-                   static_cast<std::streamsize>(page.size()));
-        const std::streamsize input_bytes = input.gcount();
-        if (input.bad())
-            throw Error("Failed to read input file during NAND write");
-        if (input_bytes == 0)
-            throw Error("Input file ended before the requested write length");
+        provide_page(page.data(), page.size());
 
         std::size_t page_offset = 0;
         while (page_offset < page.size()) {

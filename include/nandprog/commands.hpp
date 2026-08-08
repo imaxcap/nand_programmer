@@ -22,7 +22,7 @@ class CommandShell {
 public:
     CommandShell(GlobalOptions options, std::unique_ptr<Transport> transport);
     int run_repl();
-    int execute(const std::vector<std::string> &arguments, bool interactive);
+    int execute(const std::vector<std::string> &arguments);
     static void print_help();
 
 private:
@@ -41,9 +41,9 @@ private:
     void command_probe(const std::vector<std::string> &arguments);
     void command_info() const;
     void command_read(const std::vector<std::string> &arguments, bool raw);
-    void command_erase(const std::vector<std::string> &arguments,
-                       bool interactive);
+    void command_erase(const std::vector<std::string> &arguments);
     void command_write(const std::vector<std::string> &arguments, bool raw);
+    void command_write_qpic(const std::vector<std::string> &arguments);
     void command_verify(const std::vector<std::string> &arguments);
 };
 

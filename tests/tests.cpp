@@ -2,6 +2,7 @@
 #include "nandprog/error.hpp"
 #include "nandprog/nand_client.hpp"
 #include "nandprog/protocol.hpp"
+#include "nandprog/qpic.hpp"
 #include "nandprog/transport.hpp"
 #include "nandprog/util.hpp"
 
@@ -58,6 +59,28 @@ void require(bool condition, const std::string &message) {
         throw std::runtime_error(message);
 }
 
+std::uint32_t fnv1a(const std::vector<std::uint8_t> &data) {
+    std::uint32_t hash = 2166136261U;
+    for (const auto byte : data) {
+        hash ^= byte;
+        hash *= 16777619U;
+    }
+    return hash;
+}
+
+std::vector<std::uint8_t> write_payload(const FakeTransport &transport) {
+    std::vector<std::uint8_t> payload;
+    for (std::size_t index = 1; index + 1 < transport.packets.size(); ++index) {
+        const auto &packet = transport.packets[index];
+        require(packet.size() <= nandprog::protocol::max_packet_size,
+                "write packet must fit one CDC packet");
+        require(packet[0] == 4, "write-data opcode");
+        require(packet[1] == packet.size() - 2, "write-data length");
+        payload.insert(payload.end(), packet.begin() + 2, packet.end());
+    }
+    return payload;
+}
+
 void test_protocol_encoding() {
     nandprog::protocol::Flags flags;
     flags.include_spare = true;
@@ -108,6 +131,157 @@ void test_variable_length_id() {
             "read_id command encoding");
 }
 
+void test_qpic_bch_vectors() {
+    const std::vector<std::uint8_t> zero(516, 0x00);
+    const std::vector<std::uint8_t> erased(516, 0xff);
+    std::vector<std::uint8_t> increment(516);
+    std::vector<std::uint8_t> linear(516);
+    for (std::size_t index = 0; index < increment.size(); ++index) {
+        increment[index] = static_cast<std::uint8_t>(index);
+        linear[index] = static_cast<std::uint8_t>(index * 37U + 11U);
+    }
+
+    nandprog::qpic::BchEncoder bch4(nandprog::qpic::EccMode::bch4);
+    require(bch4.encode(zero.data(), zero.size()) ==
+                std::vector<std::uint8_t>({0x00, 0x00, 0x00, 0x00,
+                                           0x00, 0x00, 0x00}),
+            "QPIC BCH4 zero vector");
+    require(bch4.encode(erased.data(), erased.size()) ==
+                std::vector<std::uint8_t>({0x07, 0x3f, 0xfb, 0xde,
+                                           0x8b, 0x0a, 0xb0}),
+            "QPIC BCH4 erased vector");
+    require(bch4.encode(increment.data(), increment.size()) ==
+                std::vector<std::uint8_t>({0xd0, 0xbb, 0x92, 0x24,
+                                           0x50, 0xb4, 0x20}),
+            "QPIC BCH4 increment vector");
+    require(bch4.encode(linear.data(), linear.size()) ==
+                std::vector<std::uint8_t>({0xa9, 0x50, 0xc3, 0xbb,
+                                           0x3c, 0x6d, 0x20}),
+            "QPIC BCH4 linear vector");
+
+    nandprog::qpic::BchEncoder bch8(nandprog::qpic::EccMode::bch8);
+    require(bch8.encode(zero.data(), zero.size()) ==
+                std::vector<std::uint8_t>({0x00, 0x00, 0x00, 0x00, 0x00,
+                                           0x00, 0x00, 0x00, 0x00, 0x00,
+                                           0x00, 0x00, 0x00}),
+            "QPIC BCH8 zero vector");
+    require(bch8.encode(erased.data(), erased.size()) ==
+                std::vector<std::uint8_t>({0xdd, 0xdd, 0x13, 0x2f, 0x6a,
+                                           0xa3, 0x2f, 0x59, 0x31, 0x60,
+                                           0x5d, 0x95, 0x7f}),
+            "QPIC BCH8 erased vector");
+    require(bch8.encode(increment.data(), increment.size()) ==
+                std::vector<std::uint8_t>({0xdb, 0x40, 0x67, 0xd6, 0x20,
+                                           0xd6, 0xc0, 0x33, 0x4a, 0xbb,
+                                           0xee, 0xb3, 0xee}),
+            "QPIC BCH8 increment vector");
+    require(bch8.encode(linear.data(), linear.size()) ==
+                std::vector<std::uint8_t>({0x6e, 0xbb, 0xaf, 0x59, 0xdf,
+                                           0x94, 0x5e, 0xcc, 0xae, 0x0b,
+                                           0x91, 0xc9, 0x19}),
+            "QPIC BCH8 linear vector");
+}
+
+void test_qpic_page_layout() {
+    const std::vector<std::uint8_t> erased(2048, 0xff);
+    nandprog::qpic::PageEncoder bch4(2048, 64,
+                                     nandprog::qpic::EccMode::bch4);
+    const auto page = bch4.encode(erased.data(), erased.size());
+    require(page.size() == 2112, "QPIC BCH4 raw page size");
+    require(bch4.codeword_count() == 4 && bch4.codeword_size() == 528 &&
+                bch4.bbm_position() == 464,
+            "QPIC BCH4 2K layout geometry");
+    const std::vector<std::uint8_t> parity =
+        {0x07, 0x3f, 0xfb, 0xde, 0x8b, 0x0a, 0xb0};
+    for (std::size_t codeword = 0; codeword < 4; ++codeword) {
+        const std::size_t offset = codeword * 528;
+        require(page[offset + 464] == 0xff, "QPIC codeword BBM");
+        require(std::equal(parity.begin(), parity.end(),
+                           page.begin() + static_cast<std::ptrdiff_t>(offset + 517)),
+                "QPIC codeword parity placement");
+    }
+
+    nandprog::qpic::PageEncoder bch8(4096, 256,
+                                     nandprog::qpic::EccMode::bch8);
+    require(bch8.codeword_count() == 8 && bch8.codeword_size() == 532 &&
+                bch8.bbm_position() == 372 && bch8.raw_page_size() == 4352,
+            "QPIC BCH8 4K layout geometry");
+
+    bool rejected = false;
+    try {
+        (void)nandprog::qpic::PageEncoder(2048, 64,
+                                          nandprog::qpic::EccMode::bch8);
+    } catch (const nandprog::Error &) {
+        rejected = true;
+    }
+    require(rejected, "QPIC layout must reject insufficient OOB");
+}
+
+void test_qpic_upstream_golden_pages() {
+    // Full-page hashes from ecsv/qcom-nandc-pagify commit 71c3c19b106ab.
+    // Its tests/resources/*.bin vectors are published under CC0-1.0.
+    const std::vector<std::uint8_t> zero2k(2048, 0x00);
+    const std::vector<std::uint8_t> upstream_ff2k(2048, 0xff);
+    nandprog::qpic::PageEncoder bch4(2048, 64,
+                                     nandprog::qpic::EccMode::bch4);
+    require(fnv1a(bch4.encode(zero2k.data(), zero2k.size())) == 0xf8c588f3U,
+            "upstream QPIC BCH4 zero-page golden vector");
+    require(fnv1a(bch4.encode(upstream_ff2k.data(), upstream_ff2k.size())) ==
+                0x41025cd5U,
+            "upstream QPIC BCH4 ff-page golden vector");
+
+    const std::vector<std::uint8_t> zero4k(4096, 0x00);
+    const std::vector<std::uint8_t> upstream_ff4k(4096, 0xff);
+    nandprog::qpic::PageEncoder bch8(4096, 256,
+                                     nandprog::qpic::EccMode::bch8);
+    require(fnv1a(bch8.encode(zero4k.data(), zero4k.size())) == 0xaf825a3eU,
+            "upstream QPIC BCH8 zero-page golden vector");
+    require(fnv1a(bch8.encode(upstream_ff4k.data(), upstream_ff4k.size())) ==
+                0x40a955c5U,
+            "upstream QPIC BCH8 ff-page golden vector");
+
+    const std::vector<std::uint8_t> partial = {'a', 'b', 'c'};
+    std::vector<std::uint8_t> zero_padded(2048, 0x00);
+    std::copy(partial.begin(), partial.end(), zero_padded.begin());
+    require(bch4.encode(partial.data(), partial.size()) ==
+                bch4.encode(zero_padded.data(), zero_padded.size()),
+            "QPIC partial input page must use upstream zero padding");
+}
+
+void test_qpic_write_transport() {
+    constexpr std::uint32_t raw_page_size = 2112;
+    FakeTransport transport;
+    transport.ok();
+    transport.ack(raw_page_size);
+    transport.ok();
+
+    std::vector<std::uint8_t> data(2048);
+    for (std::size_t index = 0; index < data.size(); ++index)
+        data[index] = static_cast<std::uint8_t>(index * 37U + 11U);
+    const nandprog::qpic::PageEncoder encoder(
+        2048, 64, nandprog::qpic::EccMode::bch4);
+    const auto encoded = encoder.encode(data.data(), data.size());
+
+    nandprog::NandClient client(transport);
+    nandprog::protocol::Flags flags;
+    flags.skip_bad = true;
+    flags.include_spare = true;
+    client.write_pages(
+        [&encoded](std::uint8_t *page, std::size_t size) {
+            require(size == encoded.size(), "QPIC provider page size");
+            std::copy(encoded.begin(), encoded.end(), page);
+        },
+        raw_page_size * 2ULL, raw_page_size, raw_page_size, flags);
+
+    require(transport.packets.front()[17] == 3,
+            "QPIC write must skip bad blocks, include OOB, and disable HW ECC");
+    require(nandprog::protocol::decode_u64(transport.packets.front().data() + 1) ==
+                raw_page_size * 2ULL,
+            "QPIC data-space page offset must map to raw-space address");
+    require(write_payload(transport) == encoded,
+            "QPIC write transport must preserve the generated raw page");
+}
+
 void test_raw_write_identity() {
     constexpr std::uint32_t raw_page_size = 2112;
     constexpr std::uint64_t image_size = raw_page_size * 2ULL;
@@ -136,16 +310,8 @@ void test_raw_write_identity() {
     require(transport.packets.back() == std::vector<std::uint8_t>{5},
             "raw write-end packet");
 
-    std::vector<std::uint8_t> payload;
-    for (std::size_t index = 1; index + 1 < transport.packets.size(); ++index) {
-        const auto &packet = transport.packets[index];
-        require(packet.size() <= nandprog::protocol::max_packet_size,
-                "raw write packet must fit one CDC packet");
-        require(packet[0] == 4, "raw write-data opcode");
-        require(packet[1] == packet.size() - 2, "raw write-data length");
-        payload.insert(payload.end(), packet.begin() + 2, packet.end());
-    }
-    require(payload == std::vector<std::uint8_t>(bytes.begin(), bytes.end()),
+    require(write_payload(transport) ==
+                std::vector<std::uint8_t>(bytes.begin(), bytes.end()),
             "raw write payload must be byte-for-byte identical");
 }
 
@@ -186,6 +352,10 @@ int main() {
         test_protocol_encoding();
         test_database();
         test_variable_length_id();
+        test_qpic_bch_vectors();
+        test_qpic_page_layout();
+        test_qpic_upstream_golden_pages();
+        test_qpic_write_transport();
         test_raw_write_identity();
         test_normal_write_padding();
         test_command_line_parser();

@@ -5,8 +5,8 @@ small C++17 command-line tool for Linux and Windows; it has no Qt or Boost
 dependency.
 
 The existing STM32 firmware, USB CDC protocol, NAND HAL, bootloader, and board
-design are retained. File processing and future ECC/layout conversion belong
-on the host.
+design are retained. File processing and ECC/layout conversion run on the
+host.
 
 ## Commands
 
@@ -22,6 +22,7 @@ nand> read.raw dump.raw 0 1024
 nand> erase 0 0x20000
 nand> write image.bin 0
 nand> write.raw image.raw 0
+nand> write.qpic kernel.bin 0x100000 --ecc bch8
 nand> verify image.bin 0
 ```
 
@@ -37,15 +38,19 @@ Available operations:
   data-page aligned.
 - `read.raw FILE [START-PAGE] [PAGE-COUNT]`: read physical `data+OOB` pages
   without bad-block skipping.
-- `erase all [--yes]` or `erase OFFSET LENGTH [--yes]`: erase block-aligned
-  ranges. Interactive mode asks for confirmation; one-shot mode requires
-  `--yes`.
+- `erase all` or `erase OFFSET LENGTH`: immediately erase block-aligned ranges.
+  There is no confirmation prompt or `--yes` option.
 - `write FILE [OFFSET]`: write data pages, padding the final page with `0xff`.
 - `write.raw FILE [START-PAGE]`: write complete `data+OOB` pages verbatim.
+- `write.qpic FILE [NAND-OFFSET] --ecc bch4|bch8`: generate a Qualcomm QPIC
+  x8 page/OOB layout on the PC and write it as raw pages. `NAND-OFFSET` is a
+  data-space byte offset, defaults to zero, and must be data-page aligned.
 - `verify FILE [OFFSET] [--raw]`: stream-compare NAND content against a file.
-- `write.qpic`: reserved for future Qualcomm QPIC BCH/layout support.
 
 Numbers accept decimal, `0x` hexadecimal, and `K`, `M`, or `G` binary suffixes.
+
+None of `write`, `write.raw`, or `write.qpic` erases NAND automatically. Run an
+explicit block-aligned `erase` first when the target is not already erased.
 
 ## Raw image contract
 
@@ -59,6 +64,19 @@ last NAND busy/status result. The CLI warns about this limitation and
 `verify FILE START-PAGE --raw` is recommended after raw writes. A future
 firmware update can close that acknowledgement race without changing the wire
 protocol.
+
+## QPIC image contract
+
+`write.qpic` implements the standard x8 BCH4/BCH8 page layout used by
+[qcom-nandc-pagify](https://github.com/ecsv/qcom-nandc-pagify). It uses
+516-byte codeword data, a one-byte `0xff` bad-block marker, 7-byte BCH4 or
+13-byte BCH8 parity, and the corresponding `0xff` codeword/OOB padding. A
+partial final input page is padded with `0x00`, matching the reference tool.
+
+The generated data+OOB page is streamed through the existing raw write
+protocol with STM32 hardware ECC disabled. Bad blocks are skipped. The current
+implementation targets standard x8 parallel NAND geometry; x16, RS/SBL, and
+SoC-specific boot-partition fixups are not implemented.
 
 ## Build
 

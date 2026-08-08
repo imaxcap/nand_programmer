@@ -1,9 +1,11 @@
-## [4.0.0] - Unreleased
+## [0.2.0] - Unreleased
 ### Changed
 - Replaced the Qt GUI host application with a C++17 command-line tool.
 - Replaced Qt and Boost host dependencies with native Linux and Windows serial
   transports.
 - Kept the STM32 3.5.0 firmware protocol unchanged.
+- `erase` now executes immediately in REPL and one-shot modes. The confirmation
+  prompt and `--yes` option were removed.
 
 ### Added
 - One-shot commands and an interactive U-Boot-style REPL.
@@ -11,8 +13,10 @@
   `verify` commands.
 - An `id` command that prints all NAND ID bytes returned by the firmware even
   when no CSV entry matches.
-- A reserved `write.qpic` command for future Qualcomm NAND layout support.
-- Protocol, database, and raw-write identity tests.
+- Native host-side Qualcomm QPIC x8 BCH4/BCH8 page and OOB encoding through
+  `write.qpic FILE [NAND-OFFSET] --ecc bch4|bch8`.
+- Protocol, database, raw-write identity, QPIC reference-vector, layout, and
+  transport tests.
 
 ## [1.0.0] - 2018-11-25
 - Initial release. Basic NAND operations support.
