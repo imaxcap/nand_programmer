@@ -37,11 +37,9 @@ protocol::ChipId NandClient::read_id() {
     transport_.write_packet(protocol::encode_simple(protocol::Command::read_id),
                             control_timeout_ms);
     const auto response = expect_data(control_timeout_ms);
-    if (response.payload.size() != 5)
-        throw Error("Firmware returned an invalid NAND ID response");
-    protocol::ChipId id;
-    std::copy(response.payload.begin(), response.payload.end(), id.bytes.begin());
-    return id;
+    if (response.payload.empty())
+        throw Error("Firmware returned an empty NAND ID response");
+    return {response.payload};
 }
 
 void NandClient::configure(const Chip &chip) {

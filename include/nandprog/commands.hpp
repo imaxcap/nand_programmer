@@ -37,6 +37,7 @@ private:
 
     void ensure_open();
     void ensure_probe();
+    void command_id(const std::vector<std::string> &arguments);
     void command_probe(const std::vector<std::string> &arguments);
     void command_info() const;
     void command_read(const std::vector<std::string> &arguments, bool raw);

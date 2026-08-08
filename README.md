@@ -15,6 +15,7 @@ The program supports both one-shot commands and an interactive REPL:
 ```text
 $ nandprog --device /dev/ttyACM0
 nand> probe
+nand> id
 nand> info
 nand> read dump.bin 0 0x100000
 nand> read.raw dump.raw 0 1024
@@ -26,6 +27,8 @@ nand> verify image.bin 0
 
 Available operations:
 
+- `id`: print every NAND ID byte returned by the firmware and report whether
+  the first five bytes match the CSV. It does not require a database match.
 - `probe [chip-name]`: read the firmware version and NAND ID, match the CSV
   database, and configure the programmer. Supplying a name forces a database
   entry for otherwise unknown IDs.
@@ -100,3 +103,7 @@ project. The current board exposes a USB CDC serial device and uses the legacy
 PCB and adapter designs remain under `kicad/`. The project is licensed under
 GPLv3, subject to the third-party firmware library licenses described in the
 source tree.
+
+The unchanged firmware reads five NAND ID cycles. The host preserves and
+prints any response length, but reading more than five ID bytes requires a
+future firmware change.

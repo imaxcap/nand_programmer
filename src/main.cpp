@@ -51,7 +51,7 @@ int main(int argc, char **argv) {
                     throw nandprog::Error("--chip requires a value");
                 options.forced_chip = argv[index];
             } else if (command.empty() && argument == "--version") {
-                std::cout << "nandprog 0.1.0\n";
+                std::cout << "nandprog 0.1.1\n";
                 return 0;
             } else if (command.empty() && (argument == "-h" || argument == "--help")) {
                 print_global_help();

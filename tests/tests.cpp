@@ -34,6 +34,12 @@ public:
 
     void ok() { responses.insert(responses.end(), {1, 0}); }
 
+    void data(std::initializer_list<std::uint8_t> bytes) {
+        responses.push_back(0);
+        responses.push_back(static_cast<std::uint8_t>(bytes.size()));
+        responses.insert(responses.end(), bytes);
+    }
+
     void ack(std::uint64_t bytes) {
         responses.insert(responses.end(), {1, 3});
         for (unsigned shift = 0; shift < 64; shift += 8)
@@ -81,6 +87,25 @@ void test_database() {
 
     nandprog::protocol::ChipId id{{44, 218, 144, 149, 0xff}};
     require(database.find_by_id(id) == chip, "chip ID wildcard matching");
+
+    nandprog::protocol::ChipId extended_id{
+        {44, 218, 144, 149, 0xff, 0x12, 0x34, 0x56}};
+    require(database.find_by_id(extended_id) == chip,
+            "extra raw ID bytes must not break five-column CSV matching");
+}
+
+void test_variable_length_id() {
+    FakeTransport transport;
+    transport.data({0x2c, 0xda, 0x90, 0x95, 0x46, 0x76, 0x00, 0x15});
+
+    nandprog::NandClient client(transport);
+    const auto id = client.read_id();
+    require(id.bytes == std::vector<std::uint8_t>(
+                            {0x2c, 0xda, 0x90, 0x95, 0x46, 0x76, 0x00, 0x15}),
+            "read_id must preserve every byte returned by firmware");
+    require(transport.packets.size() == 1 &&
+                transport.packets.front() == std::vector<std::uint8_t>{0},
+            "read_id command encoding");
 }
 
 void test_raw_write_identity() {
@@ -160,6 +185,7 @@ int main() {
     try {
         test_protocol_encoding();
         test_database();
+        test_variable_length_id();
         test_raw_write_identity();
         test_normal_write_padding();
         test_command_line_parser();

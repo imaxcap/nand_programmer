@@ -183,9 +183,11 @@ std::vector<std::uint8_t> Chip::hal_configuration() const {
 }
 
 bool Chip::matches(const protocol::ChipId &id) const {
-    for (std::size_t index = 0; index < id.bytes.size(); ++index) {
+    constexpr std::size_t database_id_bytes = 5;
+    for (std::size_t index = 0; index < database_id_bytes; ++index) {
         const auto expected = parameters[id_1 + index];
-        if (expected != undefined_parameter && expected != id.bytes[index])
+        if (expected != undefined_parameter &&
+            (index >= id.bytes.size() || expected != id.bytes[index]))
             return false;
     }
     return true;

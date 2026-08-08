@@ -2,7 +2,6 @@
 
 #include "nandprog/transport.hpp"
 
-#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <string>
@@ -51,7 +50,7 @@ struct FirmwareVersion {
 };
 
 struct ChipId {
-    std::array<std::uint8_t, 5> bytes{};
+    std::vector<std::uint8_t> bytes;
 };
 
 struct Response {

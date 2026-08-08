@@ -74,6 +74,25 @@ std::uint64_t input_file_size(const std::filesystem::path &path) {
     return size;
 }
 
+std::string format_chip_id(const protocol::ChipId &id) {
+    std::ostringstream output;
+    for (const auto byte : id.bytes)
+        output << ' ' << hex_number(byte, 2);
+    return output.str();
+}
+
+void print_firmware_version(const protocol::FirmwareVersion &version) {
+    std::cout << "Programmer firmware " << static_cast<unsigned>(version.major)
+              << '.' << static_cast<unsigned>(version.minor) << '.'
+              << version.build << '\n';
+}
+
+void print_chip_id(const protocol::ChipId &id) {
+    std::cout << "NAND ID (" << id.bytes.size()
+              << (id.bytes.size() == 1 ? " byte):" : " bytes):")
+              << format_chip_id(id) << '\n';
+}
+
 } // namespace
 
 CommandShell::CommandShell(GlobalOptions options,
@@ -84,7 +103,7 @@ CommandShell::CommandShell(GlobalOptions options,
 }
 
 int CommandShell::run_repl() {
-    std::cout << "nandprog 0.1.0 - type 'help' for commands\n";
+    std::cout << "nandprog 0.1.1 - type 'help' for commands\n";
     std::string line;
     while (true) {
         std::cout << "nand> " << std::flush;
@@ -116,6 +135,8 @@ int CommandShell::execute(const std::vector<std::string> &arguments,
     const std::string &command = arguments.front();
     if (command == "help" || command == "--help" || command == "-h")
         print_help();
+    else if (command == "id")
+        command_id(arguments);
     else if (command == "probe")
         command_probe(arguments);
     else if (command == "info") {
@@ -152,6 +173,25 @@ void CommandShell::ensure_probe() {
         command_probe({"probe"});
 }
 
+void CommandShell::command_id(const std::vector<std::string> &arguments) {
+    if (arguments.size() != 1)
+        throw Error("Usage: id");
+    ensure_open();
+
+    firmware_version_ = client_.firmware_version();
+    if (!probed_)
+        client_.configure(database_.first());
+    chip_id_ = client_.read_id();
+
+    print_firmware_version(firmware_version_);
+    print_chip_id(chip_id_);
+    const Chip *match = database_.find_by_id(chip_id_);
+    if (match == nullptr)
+        std::cout << "Database match: none\n";
+    else
+        std::cout << "Database match: " << match->name << '\n';
+}
+
 void CommandShell::command_probe(const std::vector<std::string> &arguments) {
     if (arguments.size() > 2)
         throw Error("Usage: probe [chip-name]");
@@ -171,12 +211,12 @@ void CommandShell::command_probe(const std::vector<std::string> &arguments) {
     } else {
         client_.configure(database_.first());
         chip_id_ = client_.read_id();
+        print_firmware_version(firmware_version_);
+        print_chip_id(chip_id_);
         chip_ = database_.find_by_id(chip_id_);
         if (chip_ == nullptr) {
             std::ostringstream message;
-            message << "Unknown NAND ID";
-            for (const auto byte : chip_id_.bytes)
-                message << ' ' << hex_number(byte, 2);
+            message << "Unknown NAND ID:" << format_chip_id(chip_id_);
             message << "; add it to the database or use 'probe CHIP-NAME'";
             throw Error(message.str());
         }
@@ -184,14 +224,11 @@ void CommandShell::command_probe(const std::vector<std::string> &arguments) {
     }
 
     probed_ = true;
-    std::cout << "Programmer firmware "
-              << static_cast<unsigned>(firmware_version_.major) << '.'
-              << static_cast<unsigned>(firmware_version_.minor) << '.'
-              << firmware_version_.build << '\n';
-    std::cout << "NAND ID:";
-    for (const auto byte : chip_id_.bytes)
-        std::cout << ' ' << hex_number(byte, 2);
-    std::cout << "\nDetected: " << chip_->name << '\n';
+    if (forced) {
+        print_firmware_version(firmware_version_);
+        print_chip_id(chip_id_);
+    }
+    std::cout << "Detected: " << chip_->name << '\n';
 }
 
 void CommandShell::command_info() const {
@@ -199,6 +236,7 @@ void CommandShell::command_info() const {
         throw Error("Run probe first");
     std::cout << "Device:          " << options_.device << '\n'
               << "Chip:            " << chip_->name << '\n'
+              << "NAND ID:         " << format_chip_id(chip_id_) << '\n'
               << "Data page:       " << chip_->page_size << " bytes\n"
               << "OOB:             " << chip_->spare_size << " bytes\n"
               << "Raw page:        " << chip_->raw_page_size() << " bytes\n"
@@ -469,6 +507,7 @@ void CommandShell::command_verify(const std::vector<std::string> &arguments) {
 void CommandShell::print_help() {
     std::cout
         << "Commands:\n"
+        << "  id                                        print raw NAND ID bytes\n"
         << "  probe [chip-name]                         detect and configure NAND\n"
         << "  info                                      show active NAND geometry\n"
         << "  read FILE [OFFSET] [LENGTH]               read data area\n"

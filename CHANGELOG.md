@@ -9,6 +9,8 @@
 - One-shot commands and an interactive U-Boot-style REPL.
 - `probe`, `info`, `read`, `read.raw`, `erase`, `write`, `write.raw`, and
   `verify` commands.
+- An `id` command that prints all NAND ID bytes returned by the firmware even
+  when no CSV entry matches.
 - A reserved `write.qpic` command for future Qualcomm NAND layout support.
 - Protocol, database, and raw-write identity tests.
 
