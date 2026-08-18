@@ -30,6 +30,7 @@ public:
     protocol::FirmwareVersion firmware_version();
     protocol::ChipId read_id();
     std::optional<protocol::OnfiInfo> probe_onfi();
+    std::optional<protocol::MibibLocation> scan_mibib();
     void configure(const Chip &chip);
     const Chip &probe(const ChipDatabase &database,
                       const std::optional<std::string> &forced_chip = {});

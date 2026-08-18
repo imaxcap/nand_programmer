@@ -6,7 +6,7 @@
 #include "nand_bad_block.h"
 #include <string.h>
 
-#define NAND_BAD_BLOCK_TABLE_SIZE 20
+#define NAND_BAD_BLOCK_TABLE_SIZE 256
 
 static uint32_t nand_bad_block_table_count;
 static uint32_t nand_bad_block_table[NAND_BAD_BLOCK_TABLE_SIZE];

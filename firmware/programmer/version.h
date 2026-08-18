@@ -8,6 +8,6 @@
 
 #define SW_VERSION_MAJOR 3
 #define SW_VERSION_MINOR 7
-#define SW_VERSION_BUILD 1
+#define SW_VERSION_BUILD 2
 
 #endif

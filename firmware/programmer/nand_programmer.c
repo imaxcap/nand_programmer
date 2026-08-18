@@ -50,7 +50,8 @@ typedef enum
     NP_CMD_NAND_SCRUB       = 0x10,
     NP_CMD_NAND_TEST        = 0x11,
     NP_CMD_NAND_PROBE_ONFI  = 0x12,
-    NP_CMD_NAND_LAST        = 0x13,
+    NP_CMD_NAND_SCAN_MIBIB  = 0x13,
+    NP_CMD_NAND_LAST        = 0x14,
 } np_cmd_code_t;
 
 enum
@@ -71,6 +72,7 @@ enum
     NP_ERR_LEN_INVALID    = -112,
     NP_ERR_BBT_OVERFLOW   = -113,
     NP_ERR_TEST_FAIL      = -114,
+    NP_ERR_MIBIB_NOT_FOUND = -115,
 };
 
 typedef struct __attribute__((__packed__))
@@ -250,6 +252,14 @@ typedef struct __attribute__((__packed__))
     uint8_t  row_cycles;
     uint8_t  col_cycles;
 } np_resp_onfi_t;
+
+typedef struct __attribute__((__packed__))
+{
+    np_resp_t header;
+    uint64_t mibib_offset;
+    uint8_t  qpic_mode;
+    uint8_t  reserved[7];
+} np_resp_scan_mibib_t;
 
 typedef struct
 {
@@ -1997,6 +2007,95 @@ static int np_cmd_nand_probe_onfi(np_prog_t *prog)
     return np_comm_cb->send((uint8_t *)&resp, sizeof(resp));
 }
 
+static inline bool check_mibib_magic(const uint8_t *buf, uint32_t len)
+{
+    if (len < 32)
+        return false;
+    uint32_t i;
+    for (i = 0; i + 16 <= len && i <= 64; i += 4)
+    {
+        uint32_t m1 = *(const uint32_t *)(buf + i);
+        if (m1 == 0xFE569FAC) // MIBIB Header
+            return true;
+        if (m1 == 0x55EE73AA || m1 == 0xAA7D1B9A) // SYS / USR Table Header
+            return true;
+    }
+    return false;
+}
+
+static int np_cmd_nand_scan_mibib(np_prog_t *prog)
+{
+    if (!prog->chip_is_conf)
+        return NP_ERR_CHIP_NOT_CONF;
+
+    uint32_t page_size = prog->chip_info.page_size;
+    uint32_t spare_size = prog->chip_info.spare_size;
+    uint32_t raw_page_size = page_size + spare_size;
+    if (page_size == 0 || raw_page_size > NP_MAX_PAGE_SIZE)
+        return NP_ERR_INTERNAL;
+
+    uint32_t pages_per_block = prog->chip_info.block_size / page_size;
+    uint32_t max_blocks_to_scan = 8;
+    uint32_t total_blocks = (uint32_t)(prog->chip_info.total_size / prog->chip_info.block_size);
+    if (max_blocks_to_scan > total_blocks)
+        max_blocks_to_scan = total_blocks;
+
+    for (uint32_t block = 0; block < max_blocks_to_scan; block++)
+    {
+        uint32_t start_page = block * pages_per_block;
+        if (prog->bb_is_read && nand_bad_block_table_lookup(start_page))
+            continue;
+
+        uint32_t status = hal[prog->hal]->read_page(qpic_raw_buf, start_page, raw_page_size);
+        if (status != FLASH_STATUS_READY)
+            continue;
+
+        // 1. Check raw buffer
+        if (check_mibib_magic(qpic_raw_buf, raw_page_size))
+        {
+            np_resp_scan_mibib_t resp;
+            resp.header.code = NP_RESP_DATA;
+            resp.header.info = sizeof(resp) - sizeof(resp.header);
+            resp.mibib_offset = (uint64_t)block * prog->chip_info.block_size;
+            resp.qpic_mode = 0;
+            memset(resp.reserved, 0, sizeof(resp.reserved));
+            return np_comm_cb->send((uint8_t *)&resp, sizeof(resp));
+        }
+
+        // 2. Try QPIC BCH4 deinterleave
+        if (qpic_deinterleave_page(qpic_raw_buf, prog->page.buf, page_size, spare_size, QPIC_ECC_BCH4) == 0)
+        {
+            if (check_mibib_magic(prog->page.buf, page_size))
+            {
+                np_resp_scan_mibib_t resp;
+                resp.header.code = NP_RESP_DATA;
+                resp.header.info = sizeof(resp) - sizeof(resp.header);
+                resp.mibib_offset = (uint64_t)block * prog->chip_info.block_size;
+                resp.qpic_mode = 4;
+                memset(resp.reserved, 0, sizeof(resp.reserved));
+                return np_comm_cb->send((uint8_t *)&resp, sizeof(resp));
+            }
+        }
+
+        // 3. Try QPIC BCH8 deinterleave
+        if (qpic_deinterleave_page(qpic_raw_buf, prog->page.buf, page_size, spare_size, QPIC_ECC_BCH8) == 0)
+        {
+            if (check_mibib_magic(prog->page.buf, page_size))
+            {
+                np_resp_scan_mibib_t resp;
+                resp.header.code = NP_RESP_DATA;
+                resp.header.info = sizeof(resp) - sizeof(resp.header);
+                resp.mibib_offset = (uint64_t)block * prog->chip_info.block_size;
+                resp.qpic_mode = 8;
+                memset(resp.reserved, 0, sizeof(resp.reserved));
+                return np_comm_cb->send((uint8_t *)&resp, sizeof(resp));
+            }
+        }
+    }
+
+    return NP_ERR_MIBIB_NOT_FOUND;
+}
+
 static np_cmd_handler_t cmd_handler[] =
 {
     { NP_CMD_NAND_READ_ID, 1, np_cmd_nand_read_id },
@@ -2018,6 +2117,7 @@ static np_cmd_handler_t cmd_handler[] =
     { NP_CMD_NAND_SCRUB, 1, np_cmd_nand_scrub },
     { NP_CMD_NAND_TEST, 1, np_cmd_nand_test },
     { NP_CMD_NAND_PROBE_ONFI, 0, np_cmd_nand_probe_onfi },
+    { NP_CMD_NAND_SCAN_MIBIB, 1, np_cmd_nand_scan_mibib },
 };
 
 static bool np_cmd_is_valid(np_cmd_code_t code)

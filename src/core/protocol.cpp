@@ -172,6 +172,15 @@ OnfiInfo decode_onfi(const std::vector<std::uint8_t> &payload) {
     return info;
 }
 
+MibibLocation decode_scan_mibib(const Response &response) {
+    if (response.code != ResponseCode::data || response.payload.size() < 9)
+        throw Error("Invalid scan_mibib response payload (" + std::to_string(response.payload.size()) + " bytes)");
+    MibibLocation loc;
+    loc.offset = decode_u64(response.payload.data());
+    loc.qpic_mode = response.payload[8];
+    return loc;
+}
+
 std::string firmware_error_message(std::uint8_t code) {
     switch (code) {
     case 1:
@@ -204,6 +213,10 @@ std::string firmware_error_message(std::uint8_t code) {
         return "Invalid data length";
     case 113:
         return "Bad-block table overflow";
+    case 114:
+        return "NAND reliability test verification failed";
+    case 115:
+        return "Qualcomm MIBIB partition table not found in flash";
     default:
         return "Unknown firmware error";
     }

@@ -62,6 +62,21 @@ std::optional<protocol::OnfiInfo> NandClient::probe_onfi() {
     return std::nullopt;
 }
 
+std::optional<protocol::MibibLocation> NandClient::scan_mibib() {
+    transport_.write_packet(
+        protocol::encode_simple(protocol::Command::scan_mibib),
+        control_timeout_ms);
+    try {
+        const auto response = protocol::read_response(transport_, control_timeout_ms);
+        if (response.code == protocol::ResponseCode::data) {
+            return protocol::decode_scan_mibib(response);
+        }
+    } catch (...) {
+        return std::nullopt;
+    }
+    return std::nullopt;
+}
+
 void NandClient::configure(const Chip &chip) {
     transport_.write_packet(
         protocol::encode_configure(0, chip.page_size, chip.block_size,

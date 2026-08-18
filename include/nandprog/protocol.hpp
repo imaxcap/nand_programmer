@@ -25,6 +25,7 @@ enum class Command : std::uint8_t {
     scrub = 0x10,
     test = 0x11,
     probe_onfi = 0x12,
+    scan_mibib = 0x13,
 };
 
 enum class TestMode : std::uint8_t {
@@ -76,6 +77,11 @@ struct OnfiInfo {
     std::uint8_t col_cycles = 0;
 };
 
+struct MibibLocation {
+    std::uint64_t offset = 0;
+    std::uint8_t qpic_mode = 0; // 0 = raw, 4 = bch4, 8 = bch8
+};
+
 struct Response {
     ResponseCode code{};
     std::uint8_t info = 0;
@@ -100,6 +106,7 @@ Response read_response(Transport &transport, unsigned timeout_ms);
 std::uint64_t decode_u64(const std::uint8_t *data);
 std::uint32_t decode_u32(const std::uint8_t *data);
 OnfiInfo decode_onfi(const std::vector<std::uint8_t> &payload);
+MibibLocation decode_scan_mibib(const Response &response);
 std::string firmware_error_message(std::uint8_t code);
 
 } // namespace nandprog::protocol

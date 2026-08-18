@@ -36,7 +36,7 @@ jobs:
       - name: Upload Firmware Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: nando-stm32-firmware-v3.7.1
+          name: nando-stm32-firmware-v3.7.2
           path: |
             firmware/obj/nando_fw.bin
             firmware/obj/nando_fw.hex

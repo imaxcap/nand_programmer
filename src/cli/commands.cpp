@@ -1313,8 +1313,44 @@ std::optional<mibib::PartitionTable> CommandShell::read_mibib_table(bool force_r
         return cached_mibib_;
 
     ensure_probe();
-    constexpr std::uint64_t max_scan_limit = 4 * 1024 * 1024; // Scan up to 4MB
-    constexpr std::uint64_t scan_step = 64 * 1024;            // 64KB aligned steps
+
+    // 0. Fast on-chip MIBIB locator offloaded to STM32 (v3.7.2+)
+    try {
+        auto loc = client_.scan_mibib();
+        if (loc) {
+            log_debug("On-chip MIBIB scan located table at offset " + hex_number(loc->offset) +
+                      " (mode=" + std::to_string(static_cast<int>(loc->qpic_mode)) + ")");
+            std::vector<std::uint8_t> buffer;
+            buffer.reserve(static_cast<std::size_t>(chip_->page_size * 2));
+            protocol::Flags flags;
+            flags.skip_bad = true;
+            if (loc->qpic_mode == 4) {
+                flags.qpic_bch4 = true;
+            } else if (loc->qpic_mode == 8) {
+                flags.qpic_bch8 = true;
+            }
+            client_.read(
+                loc->offset, chip_->page_size * 2, flags,
+                [&buffer](const std::uint8_t *data, std::size_t size) {
+                    buffer.insert(buffer.end(), data, data + size);
+                },
+                nullptr, nullptr);
+
+            if (!buffer.empty()) {
+                auto table = mibib::parse_mibib(
+                    buffer.data(), buffer.size(), chip_->block_size, chip_->total_size, loc->offset);
+                if (table && !table->partitions.empty()) {
+                    cached_mibib_ = std::move(table);
+                    return cached_mibib_;
+                }
+            }
+        }
+    } catch (...) {
+        // Fallback to manual scanning below for legacy firmware
+    }
+
+    const std::uint64_t scan_step = std::max<std::uint64_t>(chip_->block_size, 64 * 1024);
+    const std::uint64_t max_scan_limit = 8 * chip_->block_size; // Scan first 8 blocks
     const std::uint64_t total_scan = std::min(chip_->total_size, max_scan_limit);
 
     const std::uint64_t raw_page_size = chip_->raw_page_size();
