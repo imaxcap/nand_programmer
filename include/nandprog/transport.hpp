@@ -18,6 +18,7 @@ public:
                               unsigned timeout_ms) = 0;
     virtual void read_exact(std::uint8_t *data, std::size_t size,
                             unsigned timeout_ms) = 0;
+    virtual void flush() {}
 
     void write_packet(const std::vector<std::uint8_t> &packet,
                       unsigned timeout_ms) {

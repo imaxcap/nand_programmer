@@ -106,6 +106,8 @@ public:
         }
     }
 
+    void flush() override {}
+
 private:
     HANDLE handle_ = INVALID_HANDLE_VALUE;
 

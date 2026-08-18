@@ -645,6 +645,17 @@ static int np_cmd_nand_write_start(np_prog_t *prog)
         return NP_ERR_LEN_NOT_ALIGN;
     }
 
+    if (prog->nand_wr_in_progress)
+    {
+        DEBUG_PRINT("Wait for previous NAND write before starting a new write\r\n");
+        do
+        {
+            if (np_nand_handle_status(prog))
+                return NP_ERR_NAND_WR;
+        }
+        while (prog->nand_wr_in_progress);
+    }
+
     prog->skip_bb = write_start_cmd->flags.skip_bb;
     if (prog->skip_bb && !prog->bb_is_read &&
         (ret = _np_cmd_read_bad_blocks(prog, false)))

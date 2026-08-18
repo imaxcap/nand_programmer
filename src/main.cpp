@@ -50,6 +50,8 @@ int main(int argc, char **argv) {
                 if (++index >= argc)
                     throw nandprog::Error("--chip requires a value");
                 options.forced_chip = argv[index];
+            } else if (command.empty() && (argument == "-v" || argument == "--verbose" || argument == "--debug")) {
+                nandprog::set_debug_enabled(true);
             } else if (command.empty() && argument == "--version") {
                 std::cout << "nandprog 0.2.0\n";
                 return 0;

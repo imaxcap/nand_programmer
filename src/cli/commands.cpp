@@ -156,7 +156,15 @@ int CommandShell::execute(const std::vector<std::string> &arguments) {
         command_verify(arguments);
     else if (command == "write.qpic")
         command_write_qpic(arguments);
-    else if (command == "exit" || command == "quit")
+    else if (command == "debug" || command == "verbose") {
+        if (arguments.size() >= 2 && (arguments[1] == "off" || arguments[1] == "0" || arguments[1] == "false")) {
+            set_debug_enabled(false);
+            std::cout << "Debug logging disabled\n";
+        } else {
+            set_debug_enabled(true);
+            std::cout << "Debug logging enabled\n";
+        }
+    } else if (command == "exit" || command == "quit")
         return 0;
     else
         throw Error("Unknown command: " + command + "; use 'help'");
@@ -395,15 +403,15 @@ void CommandShell::command_write(const std::vector<std::string> &arguments,
 
 void CommandShell::command_write_qpic(
     const std::vector<std::string> &arguments) {
-    if (arguments.size() < 4)
-        throw Error("Usage: write.qpic FILE [NAND-OFFSET] --ecc bch4|bch8");
+    if (arguments.size() < 2)
+        throw Error("Usage: write.qpic FILE [NAND-OFFSET] [--ecc bch4|bch8]");
 
     std::optional<qpic::EccMode> ecc_mode;
     std::optional<std::uint64_t> nand_offset;
     for (std::size_t index = 2; index < arguments.size(); ++index) {
         if (arguments[index] == "--ecc") {
             if (ecc_mode || ++index >= arguments.size())
-                throw Error("Usage: write.qpic FILE [NAND-OFFSET] --ecc bch4|bch8");
+                throw Error("Usage: write.qpic FILE [NAND-OFFSET] [--ecc bch4|bch8]");
             if (arguments[index] == "bch4")
                 ecc_mode = qpic::EccMode::bch4;
             else if (arguments[index] == "bch8")
@@ -419,7 +427,7 @@ void CommandShell::command_write_qpic(
         }
     }
     if (!ecc_mode)
-        throw Error("write.qpic requires --ecc bch4 or --ecc bch8");
+        ecc_mode = qpic::EccMode::bch4;
 
     ensure_probe();
     const std::filesystem::path path = arguments[1];

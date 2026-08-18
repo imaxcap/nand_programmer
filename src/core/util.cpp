@@ -4,6 +4,7 @@
 
 #include <cctype>
 #include <iomanip>
+#include <iostream>
 #include <sstream>
 
 namespace nandprog {
@@ -103,6 +104,39 @@ std::filesystem::path find_database(const std::filesystem::path &requested,
             return candidate;
     }
     throw Error("Could not find nando_parallel_chip_db.csv; use --db PATH");
+}
+
+namespace {
+bool g_debug_enabled = false;
+}
+
+void set_debug_enabled(bool enabled) {
+    g_debug_enabled = enabled;
+}
+
+bool is_debug_enabled() {
+    if (g_debug_enabled)
+        return true;
+    const char *env = std::getenv("NANDPROG_DEBUG");
+    return env != nullptr && std::string(env) != "0";
+}
+
+void log_debug(const std::string &message) {
+    if (is_debug_enabled()) {
+        std::cerr << "[DEBUG] " << message << std::endl;
+    }
+}
+
+std::string hex_dump(const std::uint8_t *data, std::size_t size, std::size_t max_bytes) {
+    std::ostringstream stream;
+    const std::size_t print_size = std::min(size, max_bytes);
+    for (std::size_t i = 0; i < print_size; ++i) {
+        if (i > 0) stream << " ";
+        stream << hex_number(data[i], 2);
+    }
+    if (size > max_bytes)
+        stream << " ... (" << size << " bytes total)";
+    return stream.str();
 }
 
 } // namespace nandprog

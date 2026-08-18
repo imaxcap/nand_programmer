@@ -22,6 +22,8 @@ public:
     void close() noexcept override { open_ = false; }
     bool is_open() const noexcept override { return open_; }
 
+    void flush() override { ++flush_count; }
+
     void write_packet(const std::uint8_t *data, std::size_t size,
                       unsigned) override {
         packets.emplace_back(data, data + size);
@@ -50,6 +52,7 @@ public:
     }
 
     bool open_ = true;
+    std::size_t flush_count = 0;
     std::vector<std::vector<std::uint8_t>> packets;
     std::vector<std::uint8_t> responses;
     std::size_t read_offset = 0;
@@ -336,6 +339,36 @@ void test_raw_write_identity() {
             "raw write payload must be byte-for-byte identical");
 }
 
+void test_nand_operations_do_not_flush_transport() {
+    {
+        FakeTransport transport;
+        transport.ok();
+
+        nandprog::NandClient client(transport);
+        nandprog::protocol::Flags flags;
+        client.erase(0, 8, flags);
+
+        require(transport.flush_count == 0,
+                "erase must not flush the transport RX buffer");
+    }
+
+    {
+        FakeTransport transport;
+        transport.ok();
+        transport.ack(8);
+        transport.ok();
+
+        std::istringstream input(std::string("abc"));
+        nandprog::NandClient client(transport);
+        nandprog::protocol::Flags flags;
+        flags.skip_bad = true;
+        client.write(input, 0, 8, 8, flags);
+
+        require(transport.flush_count == 0,
+                "write must not flush the transport RX buffer");
+    }
+}
+
 void test_normal_write_padding() {
     FakeTransport transport;
     transport.ok();
@@ -378,6 +411,7 @@ int main() {
         test_qpic_upstream_golden_pages();
         test_qpic_write_transport();
         test_raw_write_identity();
+        test_nand_operations_do_not_flush_transport();
         test_normal_write_padding();
         test_command_line_parser();
         std::cout << "All nandprog tests passed\n";
