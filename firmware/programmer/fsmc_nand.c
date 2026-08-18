@@ -34,32 +34,6 @@
 
 #define UNDEFINED_CMD 0xFF
 
-typedef struct __attribute__((__packed__))
-{
-    uint8_t setup_time;
-    uint8_t wait_setup_time;
-    uint8_t hold_setup_time;
-    uint8_t hi_z_setup_time;
-    uint8_t clr_setup_time;
-    uint8_t ar_setup_time;
-    uint8_t row_cycles;
-    uint8_t col_cycles;
-    uint8_t read1_cmd;
-    uint8_t read2_cmd;
-    uint8_t read_spare_cmd;
-    uint8_t read_id_cmd;
-    uint8_t reset_cmd;
-    uint8_t write1_cmd;
-    uint8_t write2_cmd;
-    uint8_t erase1_cmd;
-    uint8_t erase2_cmd;
-    uint8_t status_cmd;
-    uint8_t set_features_cmd;
-    uint8_t enable_ecc_addr;
-    uint8_t enable_ecc_value;
-    uint8_t disable_ecc_value;
-} fsmc_conf_t;
-
 static fsmc_conf_t fsmc_conf;
 
 static void nand_gpio_init(void)
@@ -228,8 +202,6 @@ static void nand_read_id(chip_id_t *nand_id)
 static void nand_write_page_async(uint8_t *buf, uint32_t page,
     uint32_t page_size)
 {
-    uint32_t i;
-
     *(__IO uint8_t *)(Bank_NAND_ADDR | CMD_AREA) = fsmc_conf.write1_cmd;
 
     switch (fsmc_conf.col_cycles)
@@ -280,8 +252,26 @@ static void nand_write_page_async(uint8_t *buf, uint32_t page,
         break;
     }
 
-    for(i = 0; i < page_size; i++)
-        *(__IO uint8_t *)(Bank_NAND_ADDR | DATA_AREA) = buf[i];
+    {
+        uint32_t words = page_size >> 2;
+        uint32_t remainder = page_size & 3;
+        const uint32_t *src32 = (const uint32_t *)buf;
+        __IO uint8_t *nand_data = (__IO uint8_t *)(Bank_NAND_ADDR | DATA_AREA);
+
+        while (words--)
+        {
+            uint32_t val = *src32++;
+            *nand_data = (uint8_t)val;
+            *nand_data = (uint8_t)(val >> 8);
+            *nand_data = (uint8_t)(val >> 16);
+            *nand_data = (uint8_t)(val >> 24);
+        }
+        const uint8_t *src8 = (const uint8_t *)src32;
+        while (remainder--)
+        {
+            *nand_data = *src8++;
+        }
+    }
 
     if (fsmc_conf.write2_cmd != UNDEFINED_CMD)
         *(__IO uint8_t *)(Bank_NAND_ADDR | CMD_AREA) = fsmc_conf.write2_cmd;
@@ -290,8 +280,6 @@ static void nand_write_page_async(uint8_t *buf, uint32_t page,
 static uint32_t nand_read_data(uint8_t *buf, uint32_t page,
     uint32_t page_offset, uint32_t data_size)
 {
-    uint32_t i;
-
     *(__IO uint8_t *)(Bank_NAND_ADDR | CMD_AREA) = fsmc_conf.read1_cmd;
 
     switch (fsmc_conf.col_cycles)
@@ -354,8 +342,26 @@ static uint32_t nand_read_data(uint8_t *buf, uint32_t page,
     if (fsmc_conf.read2_cmd != UNDEFINED_CMD)
         *(__IO uint8_t *)(Bank_NAND_ADDR | CMD_AREA) = fsmc_conf.read2_cmd;
 
-    for (i = 0; i < data_size; i++)
-        buf[i] = *(__IO uint8_t *)(Bank_NAND_ADDR | DATA_AREA);
+    {
+        uint32_t words = data_size >> 2;
+        uint32_t remainder = data_size & 3;
+        uint32_t *dst32 = (uint32_t *)buf;
+        __IO uint8_t *nand_data = (__IO uint8_t *)(Bank_NAND_ADDR | DATA_AREA);
+
+        while (words--)
+        {
+            uint32_t b0 = *nand_data;
+            uint32_t b1 = *nand_data;
+            uint32_t b2 = *nand_data;
+            uint32_t b3 = *nand_data;
+            *dst32++ = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
+        }
+        uint8_t *dst8 = (uint8_t *)dst32;
+        while (remainder--)
+        {
+            *dst8++ = *nand_data;
+        }
+    }
 
     return nand_get_status();
 }
@@ -510,4 +516,65 @@ flash_hal_t hal_fsmc =
     .is_bb_supported = nand_is_bb_supported,
     .enable_hw_ecc = nand_enable_hw_ecc,
 };
+
+static uint16_t onfi_crc16(const uint8_t *data, uint32_t len)
+{
+    uint16_t crc = 0x4F4E;
+    for (uint32_t i = 0; i < len; i++)
+    {
+        crc ^= ((uint16_t)data[i]) << 8;
+        for (int bit = 0; bit < 8; bit++)
+        {
+            if (crc & 0x8000)
+                crc = (crc << 1) ^ 0x8005;
+            else
+                crc <<= 1;
+        }
+    }
+    return crc;
+}
+
+int fsmc_nand_read_onfi(onfi_param_page_t *onfi_out)
+{
+    uint8_t *dst = (uint8_t *)onfi_out;
+
+    nand_gpio_init();
+    nand_fsmc_init();
+
+    *(__IO uint8_t *)(Bank_NAND_ADDR | CMD_AREA) = 0xEC;
+    *(__IO uint8_t *)(Bank_NAND_ADDR | ADDR_AREA) = 0x00;
+
+    for (volatile int i = 0; i < 2000; i++);
+    while (nand_get_status() == FLASH_STATUS_BUSY);
+
+    /* Read first copy (256 bytes) */
+    for (int i = 0; i < 256; i++)
+    {
+        dst[i] = *(__IO uint8_t *)(Bank_NAND_ADDR | DATA_AREA);
+    }
+
+    if (onfi_out->signature != 0x49464E4F) /* "ONFI" */
+        return -1;
+
+    if (onfi_crc16(dst, 254) != onfi_out->integrity_crc)
+    {
+        /* Try reading 2nd copy at byte 256 */
+        for (int i = 0; i < 256; i++)
+        {
+            dst[i] = *(__IO uint8_t *)(Bank_NAND_ADDR | DATA_AREA);
+        }
+        if (onfi_crc16(dst, 254) != onfi_out->integrity_crc)
+        {
+            /* Try reading 3rd copy at byte 512 */
+            for (int i = 0; i < 256; i++)
+            {
+                dst[i] = *(__IO uint8_t *)(Bank_NAND_ADDR | DATA_AREA);
+            }
+            if (onfi_crc16(dst, 254) != onfi_out->integrity_crc)
+                return -2;
+        }
+    }
+
+    return 0;
+}
 

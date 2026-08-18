@@ -61,6 +61,25 @@ public:
             throw Error("Serial write was partial; command packet was not sent");
     }
 
+    void write_buffer(const std::uint8_t *data, std::size_t size,
+                      unsigned timeout_ms) override {
+        if (size == 0)
+            return;
+        std::size_t offset = 0;
+        while (offset < size) {
+            wait(POLLOUT, timeout_ms);
+            const ssize_t written = ::write(fd_, data + offset, size - offset);
+            if (written < 0) {
+                if (errno == EINTR)
+                    continue;
+                throw Error("Serial buffer write failed: " + std::string(std::strerror(errno)));
+            }
+            if (written == 0)
+                continue;
+            offset += static_cast<std::size_t>(written);
+        }
+    }
+
     void read_exact(std::uint8_t *data, std::size_t size,
                     unsigned timeout_ms) override {
         using Clock = std::chrono::steady_clock;

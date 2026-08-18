@@ -1,0 +1,45 @@
+name: Firmware
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build-firmware:
+    name: Build STM32 Firmware (v3.6.0)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install ARM GCC Toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-arm-none-eabi libnewlib-arm-none-eabi
+
+      - name: Verify Toolchain
+        run: |
+          arm-none-eabi-gcc --version
+
+      - name: Build STM32 Firmware
+        run: |
+          make -C firmware -f Makefile.linux TOOLCHAIN=arm-none-eabi-
+
+      - name: List Generated Firmware Binaries
+        run: |
+          ls -lh firmware/obj/
+          ls -lh firmware/bootloader/obj/
+          ls -lh firmware/programmer/obj/
+
+      - name: Upload Firmware Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: nando-stm32-firmware-v3.6.0
+          path: |
+            firmware/obj/nando_fw.bin
+            firmware/obj/nando_fw.hex
+            firmware/bootloader/obj/bootloader_fw.hex
+            firmware/programmer/obj/app_fw_1.hex
+            firmware/programmer/obj/app_fw_2.hex

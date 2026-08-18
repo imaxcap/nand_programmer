@@ -22,6 +22,16 @@ enum class Command : std::uint8_t {
     configure = 0x06,
     read_bad_blocks = 0x07,
     version_get = 0x08,
+    scrub = 0x10,
+    test = 0x11,
+    probe_onfi = 0x12,
+};
+
+enum class TestMode : std::uint8_t {
+    full_block = 0,
+    write_only = 1,
+    verify_only = 2,
+    full_chip = 3,
 };
 
 enum class ResponseCode : std::uint8_t { data = 0x00, status = 0x01 };
@@ -53,6 +63,17 @@ struct ChipId {
     std::vector<std::uint8_t> bytes;
 };
 
+struct OnfiInfo {
+    std::string manufacturer;
+    std::string model;
+    std::uint32_t page_size = 0;
+    std::uint32_t block_size = 0;
+    std::uint64_t total_size = 0;
+    std::uint32_t spare_size = 0;
+    std::uint8_t row_cycles = 0;
+    std::uint8_t col_cycles = 0;
+};
+
 struct Response {
     ResponseCode code{};
     std::uint8_t info = 0;
@@ -62,6 +83,9 @@ struct Response {
 std::vector<std::uint8_t> encode_simple(Command command);
 std::vector<std::uint8_t> encode_range(Command command, std::uint64_t address,
                                        std::uint64_t length, Flags flags);
+std::vector<std::uint8_t> encode_scrub(std::uint64_t address, std::uint64_t length);
+std::vector<std::uint8_t> encode_test(std::uint64_t address, std::uint64_t length,
+                                      TestMode mode, bool mark_bad, std::uint32_t seed);
 std::vector<std::uint8_t> encode_write_data(const std::uint8_t *data,
                                             std::size_t size);
 std::vector<std::uint8_t> encode_configure(
@@ -73,6 +97,7 @@ std::vector<std::uint8_t> encode_configure(
 Response read_response(Transport &transport, unsigned timeout_ms);
 std::uint64_t decode_u64(const std::uint8_t *data);
 std::uint32_t decode_u32(const std::uint8_t *data);
+OnfiInfo decode_onfi(const std::vector<std::uint8_t> &payload);
 std::string firmware_error_message(std::uint8_t code);
 
 } // namespace nandprog::protocol

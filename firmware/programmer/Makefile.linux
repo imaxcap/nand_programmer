@@ -9,7 +9,7 @@ USB_DIR=../usb_cdc/
 OBJ_DIR=obj/
 LIB_DIR=../libs/
 INCLUDE_DIR=../
-TOOLCHAIN=../../../compiler/gcc-arm-none-eabi-4_9-2015q1/bin/arm-none-eabi-
+TOOLCHAIN ?= arm-none-eabi-
 APP_1=$(OBJ_DIR)$(APP_NAME)_1
 APP_2=$(OBJ_DIR)$(APP_NAME)_2
 
@@ -43,8 +43,8 @@ CFLAGS+=-ffunction-sections -fdata-sections
 CFLAGS+=-mcpu=cortex-m3 -mthumb
 CFLAGS+=$(SPL_FLAGS)
 
-LDFLAGS_1=-mcpu=cortex-m3 -mthumb -Wl,--gc-sections -Wl,-Map=$(APP_1).map
-LDFLAGS_2=-mcpu=cortex-m3 -mthumb -Wl,--gc-sections -Wl,-Map=$(APP_2).map
+LDFLAGS_1=-mcpu=cortex-m3 -mthumb -Wl,--gc-sections -Wl,-Map=$(APP_1).map --specs=nosys.specs
+LDFLAGS_2=-mcpu=cortex-m3 -mthumb -Wl,--gc-sections -Wl,-Map=$(APP_2).map --specs=nosys.specs
 
 vpath %.c $(SRC_DIR) $(SPL_DEVICE_SUPPORT_PATH) $(SRC_BSP_DIR) $(USB_DIR)
 vpath %.s $(SRC_DIR)

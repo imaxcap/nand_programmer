@@ -29,6 +29,7 @@ public:
 
     protocol::FirmwareVersion firmware_version();
     protocol::ChipId read_id();
+    std::optional<protocol::OnfiInfo> probe_onfi();
     void configure(const Chip &chip);
     const Chip &probe(const ChipDatabase &database,
                       const std::optional<std::string> &forced_chip = {});
@@ -41,6 +42,13 @@ public:
                protocol::Flags flags,
                const ProgressCallback &on_progress = {},
                const BadBlockCallback &on_bad_block = {});
+    void scrub(std::uint64_t address, std::uint64_t length,
+               const ProgressCallback &on_progress = {},
+               const BadBlockCallback &on_bad_block = {});
+    void nand_test(std::uint64_t address, std::uint64_t length,
+                   protocol::TestMode mode, bool mark_bad, std::uint32_t seed,
+                   const ProgressCallback &on_progress = {},
+                   const BadBlockCallback &on_bad_block = {});
     void write(std::istream &input, std::uint64_t address,
                std::uint64_t length, std::uint32_t transfer_page_size,
                protocol::Flags flags,

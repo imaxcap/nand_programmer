@@ -97,6 +97,22 @@ public:
             throw Error("Serial write was partial; command packet was not sent");
     }
 
+    void write_buffer(const std::uint8_t *data, std::size_t size,
+                      unsigned timeout_ms) override {
+        if (size == 0)
+            return;
+        set_timeouts(timeout_ms);
+        std::size_t offset = 0;
+        while (offset < size) {
+            DWORD written = 0;
+            if (!WriteFile(handle_, data + offset, static_cast<DWORD>(size - offset), &written, nullptr))
+                throw Error(windows_error("Serial buffer write failed"));
+            if (written == 0)
+                throw Error("Serial buffer write failed with zero bytes written");
+            offset += static_cast<std::size_t>(written);
+        }
+    }
+
     void read_exact(std::uint8_t *data, std::size_t size,
                     unsigned timeout_ms) override {
         using Clock = std::chrono::steady_clock;

@@ -46,7 +46,10 @@ typedef enum
     NP_CMD_FW_UPDATE_S      = 0x0a,
     NP_CMD_FW_UPDATE_D      = 0x0b,
     NP_CMD_FW_UPDATE_E      = 0x0c,
-    NP_CMD_NAND_LAST        = 0x0d,
+    NP_CMD_NAND_SCRUB       = 0x10,
+    NP_CMD_NAND_TEST        = 0x11,
+    NP_CMD_NAND_PROBE_ONFI  = 0x12,
+    NP_CMD_NAND_LAST        = 0x13,
 } np_cmd_code_t;
 
 enum
@@ -66,6 +69,7 @@ enum
     NP_ERR_LEN_EXCEEDED   = -111,
     NP_ERR_LEN_INVALID    = -112,
     NP_ERR_BBT_OVERFLOW   = -113,
+    NP_ERR_TEST_FAIL      = -114,
 };
 
 typedef struct __attribute__((__packed__))
@@ -87,6 +91,31 @@ typedef struct __attribute__((__packed__))
     uint64_t len;
     np_cmd_flags_t flags;
 } np_erase_cmd_t;
+
+typedef struct __attribute__((__packed__))
+{
+    np_cmd_t cmd;
+    uint64_t addr;
+    uint64_t len;
+} np_scrub_cmd_t;
+
+enum
+{
+    NP_TEST_MODE_FULL_BLOCK  = 0,
+    NP_TEST_MODE_WRITE_ONLY  = 1,
+    NP_TEST_MODE_VERIFY_ONLY = 2,
+    NP_TEST_MODE_FULL_CHIP   = 3,
+};
+
+typedef struct __attribute__((__packed__))
+{
+    np_cmd_t cmd;
+    uint64_t addr;
+    uint64_t len;
+    uint8_t  mode;
+    uint8_t  mark_bad;
+    uint32_t seed;
+} np_test_cmd_t;
 
 typedef struct __attribute__((__packed__))
 {
@@ -205,6 +234,19 @@ typedef struct __attribute__((__packed__))
     uint8_t active_image;
 } np_resp_active_image_t;
 
+typedef struct __attribute__((__packed__))
+{
+    np_resp_t header;
+    char manufacturer[12];
+    char model[20];
+    uint32_t page_size;
+    uint32_t block_size;
+    uint64_t total_size;
+    uint32_t spare_size;
+    uint8_t  row_cycles;
+    uint8_t  col_cycles;
+} np_resp_onfi_t;
+
 typedef struct
 {
     uint32_t addr;
@@ -258,6 +300,7 @@ static np_comm_cb_t *np_comm_cb;
 static np_prog_t prog;
 
 static flash_hal_t *hal[] = { &hal_fsmc, &hal_spi };
+static int np_nand_handle_status(np_prog_t *prog);
 
 uint8_t np_packet_send_buf[NP_PACKET_BUF_SIZE];
 
@@ -360,11 +403,11 @@ static int np_read_bad_block_info_from_page(np_prog_t *prog, uint32_t block,
     case FLASH_STATUS_READY:
         break;
     case FLASH_STATUS_ERROR:
-        ERROR_PRINT("NAND read bad block info error at 0x%" PRIx64 "\r\n",
-            addr);
+        ERROR_PRINT("NAND read bad block info error at 0x%llx" "\r\n",
+            (unsigned long long)addr);
         return NP_ERR_NAND_RD;
     case FLASH_STATUS_TIMEOUT:
-        ERROR_PRINT("NAND read timeout at 0x%" PRIx64 "\r\n", addr);
+        ERROR_PRINT("NAND read timeout at 0x%llx" "\r\n", (unsigned long long)addr);
         return NP_ERR_NAND_RD;
     default:
         ERROR_PRINT("Unknown NAND status\r\n");
@@ -426,7 +469,7 @@ static int np_nand_erase(np_prog_t *prog, uint32_t page)
     uint32_t status;
     uint64_t addr = page * prog->chip_info.page_size;
     
-    DEBUG_PRINT("NAND erase at 0x%" PRIx64 "\r\n", addr);
+    DEBUG_PRINT("NAND erase at 0x%llx" "\r\n", (unsigned long long)addr);
 
     status = hal[prog->hal]->erase_block(page);
     switch (status)
@@ -438,7 +481,7 @@ static int np_nand_erase(np_prog_t *prog, uint32_t page)
             return -1;
         break;
     case FLASH_STATUS_TIMEOUT:
-        ERROR_PRINT("NAND erase timeout at 0x%" PRIx64 "\r\n", addr);
+        ERROR_PRINT("NAND erase timeout at 0x%llx" "\r\n", (unsigned long long)addr);
         break;
     default:
         ERROR_PRINT("Unknown NAND status\r\n");
@@ -468,7 +511,7 @@ static int _np_cmd_nand_erase(np_prog_t *prog)
     skip_bb = erase_cmd->flags.skip_bb;
     inc_spare = erase_cmd->flags.inc_spare;
 
-    DEBUG_PRINT("Erase at 0x%" PRIx64 " 0x%" PRIx64 " bytes command\r\n", addr,
+    DEBUG_PRINT("Erase at 0x%llx 0x%llx" " bytes command\r\n", (unsigned long long)addr,
         len);
 
     pages_in_block = prog->chip_info.block_size / prog->chip_info.page_size;
@@ -495,8 +538,8 @@ static int _np_cmd_nand_erase(np_prog_t *prog)
 
     if (addr % block_size)
     {
-        ERROR_PRINT("Address 0x%" PRIx64
-            " is not aligned to block size 0x%lx\r\n", addr, block_size);
+        ERROR_PRINT("Address 0x%llx"
+            " is not aligned to block size 0x%lx\r\n", (unsigned long long)addr, block_size);
         return NP_ERR_ADDR_NOT_ALIGN;
     }
 
@@ -508,15 +551,15 @@ static int _np_cmd_nand_erase(np_prog_t *prog)
 
     if (len % block_size)
     {
-        ERROR_PRINT("Length 0x%" PRIx64
-            " is not aligned to block size 0x%lx\r\n", len, block_size);
+        ERROR_PRINT("Length 0x%llx"
+            " is not aligned to block size 0x%lx\r\n", (unsigned long long)len, block_size);
         return NP_ERR_LEN_NOT_ALIGN;
     }
 
     if (addr + len > total_size)
     {
-        ERROR_PRINT("Erase address exceded 0x%" PRIx64 "+0x%" PRIx64
-            " is more then chip size 0x%" PRIx64 "\r\n", addr, len, total_size);
+        ERROR_PRINT("Erase address exceded 0x%llx+0x%llx"
+            " is more then chip size 0x%llx" "\r\n", (unsigned long long)addr, (unsigned long long)len, (unsigned long long)total_size);
         return NP_ERR_ADDR_EXCEEDED;
     }
 
@@ -526,14 +569,14 @@ static int _np_cmd_nand_erase(np_prog_t *prog)
     {
         if (addr >= total_size)
         {
-            ERROR_PRINT("Erase address 0x%" PRIx64
-                " is more then chip size 0x%" PRIx64 "\r\n", addr, total_size);
+            ERROR_PRINT("Erase address 0x%llx"
+                " is more then chip size 0x%llx" "\r\n", (unsigned long long)addr, (unsigned long long)total_size);
             return NP_ERR_ADDR_EXCEEDED;
         }
 
         if (skip_bb && (is_bad = nand_bad_block_table_lookup(page)))
         {
-            DEBUG_PRINT("Skipped bad block at 0x%" PRIx64 "\r\n", addr);
+            DEBUG_PRINT("Skipped bad block at 0x%llx" "\r\n", (unsigned long long)addr);
             if (np_send_bad_block_info(addr, block_size, true))
                 return -1;
         }
@@ -561,6 +604,416 @@ static int np_cmd_nand_erase(np_prog_t *prog)
     ret = _np_cmd_nand_erase(prog);
     led_wr_set(false);
 
+    return ret;
+}
+
+static int _np_cmd_nand_scrub(np_prog_t *prog)
+{
+    uint64_t addr, len, total_size, total_len;
+    uint32_t page, pages_in_block, page_size, block_size;
+    np_scrub_cmd_t *scrub_cmd;
+
+    if (prog->rx_buf_len < sizeof(np_scrub_cmd_t))
+    {
+        ERROR_PRINT("Wrong buffer length for scrub command %lu\r\n",
+            prog->rx_buf_len);
+        return NP_ERR_LEN_INVALID;
+    }
+    scrub_cmd = (np_scrub_cmd_t *)prog->rx_buf;
+    total_len = len = scrub_cmd->len;
+    addr = scrub_cmd->addr;
+
+    pages_in_block = prog->chip_info.block_size / prog->chip_info.page_size;
+    page_size = prog->chip_info.page_size;
+    block_size = prog->chip_info.block_size;
+    total_size = prog->chip_info.total_size;
+
+    if (addr % block_size)
+    {
+        ERROR_PRINT("Scrub address 0x%llx" " is not aligned to block size 0x%lx\r\n", (unsigned long long)addr, block_size);
+        return NP_ERR_ADDR_NOT_ALIGN;
+    }
+
+    if (!len || (len % block_size))
+    {
+        ERROR_PRINT("Scrub length 0x%llx" " is not aligned to block size 0x%lx\r\n", (unsigned long long)len, block_size);
+        return NP_ERR_LEN_NOT_ALIGN;
+    }
+
+    if (addr + len > total_size)
+    {
+        ERROR_PRINT("Scrub address 0x%llx exceeds chip size 0x%llx" "\r\n", (unsigned long long)(addr + len), (unsigned long long)total_size);
+        return NP_ERR_ADDR_EXCEEDED;
+    }
+
+    if (addr == 0 && len == total_size)
+    {
+        nand_bad_block_table_init();
+        prog->bb_is_read = 0;
+    }
+
+    page = addr / page_size;
+
+    while (len)
+    {
+        if (np_nand_erase(prog, page))
+            return NP_ERR_NAND_ERASE;
+
+        addr += block_size;
+        page += pages_in_block;
+        len -= block_size;
+
+        np_send_progress(total_len - len);
+    }
+
+    return np_send_ok_status();
+}
+
+static int np_cmd_nand_scrub(np_prog_t *prog)
+{
+    int ret;
+    led_wr_set(true);
+    ret = _np_cmd_nand_scrub(prog);
+    led_wr_set(false);
+    return ret;
+}
+
+static inline uint32_t nand_prbs32_next(uint32_t *state)
+{
+    uint32_t x = *state;
+    x ^= x << 13;
+    x ^= x >> 17;
+    x ^= x << 5;
+    *state = x;
+    return x;
+}
+
+static void nand_generate_prbs_page(uint32_t page_num, uint32_t base_seed, uint8_t *buf, uint32_t data_size)
+{
+    uint32_t seed = (base_seed ^ (page_num * 0x1F1F1F1FU + 0x12345678U));
+    if (seed == 0) seed = 0xA5A55A5AU;
+    uint32_t *dst32 = (uint32_t *)buf;
+    uint32_t words = data_size >> 2;
+    while (words--) {
+        *dst32++ = nand_prbs32_next(&seed);
+    }
+}
+
+static void nand_calc_ecc_for_page(const uint8_t *data, uint32_t data_len, uint8_t *oob, uint32_t spare_len)
+{
+    memset(oob, 0xFF, spare_len);
+    uint32_t sectors = data_len / 512;
+    if (sectors == 0) sectors = 1;
+    for (uint32_t s = 0; s < sectors; s++) {
+        const uint8_t *sec_data = data + s * 512;
+        uint8_t p_even = 0, p_odd = 0, col_parity = 0;
+        for (int i = 0; i < 512; i++) {
+            uint8_t b = sec_data[i];
+            col_parity ^= b;
+            if (__builtin_parity(b)) {
+                p_odd ^= (uint8_t)i;
+                p_even ^= (uint8_t)(~i);
+            }
+        }
+        if (8 + s * 3 + 2 < spare_len) {
+            oob[8 + s * 3 + 0] = col_parity;
+            oob[8 + s * 3 + 1] = p_odd;
+            oob[8 + s * 3 + 2] = p_even;
+        }
+    }
+}
+
+static int nand_verify_ecc_for_page(const uint8_t *data, uint32_t data_len, const uint8_t *oob, uint32_t spare_len)
+{
+    uint32_t sectors = data_len / 512;
+    if (sectors == 0) sectors = 1;
+    for (uint32_t s = 0; s < sectors; s++) {
+        const uint8_t *sec_data = data + s * 512;
+        uint8_t p_even = 0, p_odd = 0, col_parity = 0;
+        for (int i = 0; i < 512; i++) {
+            uint8_t b = sec_data[i];
+            col_parity ^= b;
+            if (__builtin_parity(b)) {
+                p_odd ^= (uint8_t)i;
+                p_even ^= (uint8_t)(~i);
+            }
+        }
+        if (8 + s * 3 + 2 < spare_len) {
+            if (oob[8 + s * 3 + 0] != col_parity ||
+                oob[8 + s * 3 + 1] != p_odd ||
+                oob[8 + s * 3 + 2] != p_even) {
+                return -1;
+            }
+        }
+    }
+    return 0;
+}
+
+static void nand_re_mark_bad_block(np_prog_t *prog, uint32_t block_page)
+{
+    uint8_t zero_page[64];
+    memset(zero_page, 0x00, sizeof(zero_page));
+    hal[prog->hal]->write_page_async(zero_page, block_page, sizeof(zero_page));
+    while (prog->nand_wr_in_progress) {
+        np_nand_handle_status(prog);
+    }
+    hal[prog->hal]->write_page_async(zero_page, block_page + 1, sizeof(zero_page));
+    while (prog->nand_wr_in_progress) {
+        np_nand_handle_status(prog);
+    }
+    nand_bad_block_table_add(block_page);
+}
+
+static uint8_t test_read_buf[NP_MAX_PAGE_SIZE];
+
+static int _np_cmd_nand_test(np_prog_t *prog)
+{
+    uint64_t addr, len, total_size, total_len;
+    uint32_t page, pages_in_block, data_page_size, spare_size, raw_page_size, block_size;
+    np_test_cmd_t *test_cmd;
+    uint8_t mode, mark_bad;
+    uint32_t seed;
+
+    if (prog->rx_buf_len < sizeof(np_test_cmd_t))
+    {
+        ERROR_PRINT("Wrong buffer length for test command %lu\r\n", prog->rx_buf_len);
+        return NP_ERR_LEN_INVALID;
+    }
+    test_cmd = (np_test_cmd_t *)prog->rx_buf;
+    total_len = len = test_cmd->len;
+    addr = test_cmd->addr;
+    mode = test_cmd->mode;
+    mark_bad = test_cmd->mark_bad;
+    seed = test_cmd->seed ? test_cmd->seed : 0xA5A55A5AU;
+
+    data_page_size = prog->chip_info.page_size;
+    spare_size = prog->chip_info.spare_size;
+    raw_page_size = data_page_size + spare_size;
+    pages_in_block = prog->chip_info.block_size / data_page_size;
+    block_size = prog->chip_info.block_size;
+    total_size = prog->chip_info.total_size;
+
+    if (addr % block_size)
+    {
+        ERROR_PRINT("Test address 0x%llx" " is not block aligned\r\n", (unsigned long long)addr);
+        return NP_ERR_ADDR_NOT_ALIGN;
+    }
+    if (!len || (len % block_size))
+    {
+        ERROR_PRINT("Test length 0x%llx" " is not block aligned\r\n", (unsigned long long)len);
+        return NP_ERR_LEN_NOT_ALIGN;
+    }
+    if (addr + len > total_size)
+    {
+        ERROR_PRINT("Test range exceeds chip size 0x%llx" "\r\n", (unsigned long long)total_size);
+        return NP_ERR_ADDR_EXCEEDED;
+    }
+
+    if (mode == NP_TEST_MODE_FULL_CHIP)
+    {
+        /* Mode: Full-disk RDT spanning (Phase 1: Write all blocks -> Phase 2: Verify all blocks) */
+        uint64_t cur_addr = addr;
+        uint64_t rem_len = len;
+        uint32_t cur_page = addr / data_page_size;
+
+        /* Phase 1: Erase and write all blocks across the range */
+        while (rem_len)
+        {
+            uint32_t block_start_page = cur_page;
+            bool block_bad = false;
+
+            if (np_nand_erase(prog, block_start_page))
+            {
+                block_bad = true;
+                if (mark_bad)
+                    nand_re_mark_bad_block(prog, block_start_page);
+                np_send_bad_block_info(cur_addr, block_size, false);
+            }
+
+            if (!block_bad)
+            {
+                for (uint32_t p = 0; p < pages_in_block; p++)
+                {
+                    uint32_t page_num = block_start_page + p;
+                    nand_generate_prbs_page(page_num, seed, prog->page.buf, data_page_size);
+                    nand_calc_ecc_for_page(prog->page.buf, data_page_size, prog->page.buf + data_page_size, spare_size);
+
+                    hal[prog->hal]->write_page_async(prog->page.buf, page_num, raw_page_size);
+                    prog->nand_wr_in_progress = 1;
+                    while (prog->nand_wr_in_progress)
+                    {
+                        if (np_nand_handle_status(prog))
+                        {
+                            block_bad = true;
+                            break;
+                        }
+                    }
+                    if (block_bad)
+                        break;
+                }
+                if (block_bad)
+                {
+                    if (mark_bad)
+                        nand_re_mark_bad_block(prog, block_start_page);
+                    np_send_bad_block_info(cur_addr, block_size, false);
+                }
+            }
+
+            cur_addr += block_size;
+            cur_page += pages_in_block;
+            rem_len -= block_size;
+            np_send_progress((total_len - rem_len) / 2);
+        }
+
+        /* Phase 2: Read back and verify all blocks across the range */
+        cur_addr = addr;
+        rem_len = len;
+        cur_page = addr / data_page_size;
+
+        while (rem_len)
+        {
+            uint32_t block_start_page = cur_page;
+            bool block_bad = false;
+
+            for (uint32_t p = 0; p < pages_in_block; p++)
+            {
+                uint32_t page_num = block_start_page + p;
+                hal[prog->hal]->read_page(test_read_buf, page_num, raw_page_size);
+                nand_generate_prbs_page(page_num, seed, prog->page.buf, data_page_size);
+
+                if (memcmp(prog->page.buf, test_read_buf, data_page_size) != 0)
+                {
+                    block_bad = true;
+                    break;
+                }
+                if (nand_verify_ecc_for_page(test_read_buf, data_page_size, test_read_buf + data_page_size, spare_size) != 0)
+                {
+                    block_bad = true;
+                    break;
+                }
+            }
+            if (block_bad)
+            {
+                if (mark_bad)
+                    nand_re_mark_bad_block(prog, block_start_page);
+                np_send_bad_block_info(cur_addr, block_size, false);
+            }
+            else
+            {
+                // Clean erase on success
+                np_nand_erase(prog, block_start_page);
+            }
+
+            cur_addr += block_size;
+            cur_page += pages_in_block;
+            rem_len -= block_size;
+            np_send_progress(total_len / 2 + (total_len - rem_len) / 2);
+        }
+    }
+    else
+    {
+        /* Mode: Block-by-block, Write-only, or Verify-only */
+        page = addr / data_page_size;
+
+        while (len)
+        {
+            uint32_t block_start_page = page;
+            bool block_bad = false;
+
+            // Phase 1: Erase block if Full-Block or Write-Only mode
+            if (mode == NP_TEST_MODE_FULL_BLOCK || mode == NP_TEST_MODE_WRITE_ONLY)
+            {
+                if (np_nand_erase(prog, block_start_page))
+                {
+                    block_bad = true;
+                    if (mark_bad)
+                        nand_re_mark_bad_block(prog, block_start_page);
+                    np_send_bad_block_info(addr, block_size, false);
+                }
+            }
+
+            // Phase 2: Write PRBS random data + ECC if Full-Block or Write-Only mode
+            if (!block_bad && (mode == NP_TEST_MODE_FULL_BLOCK || mode == NP_TEST_MODE_WRITE_ONLY))
+            {
+                for (uint32_t p = 0; p < pages_in_block; p++)
+                {
+                    uint32_t cur_page = block_start_page + p;
+                    nand_generate_prbs_page(cur_page, seed, prog->page.buf, data_page_size);
+                    nand_calc_ecc_for_page(prog->page.buf, data_page_size, prog->page.buf + data_page_size, spare_size);
+
+                    hal[prog->hal]->write_page_async(prog->page.buf, cur_page, raw_page_size);
+                    prog->nand_wr_in_progress = 1;
+                    while (prog->nand_wr_in_progress)
+                    {
+                        if (np_nand_handle_status(prog))
+                        {
+                            block_bad = true;
+                            break;
+                        }
+                    }
+                    if (block_bad)
+                        break;
+                }
+                if (block_bad)
+                {
+                    if (mark_bad)
+                        nand_re_mark_bad_block(prog, block_start_page);
+                    np_send_bad_block_info(addr, block_size, false);
+                }
+            }
+
+            // Phase 3: Read back and verify PRBS + ECC if Full-Block or Verify-Only mode
+            if (!block_bad && (mode == NP_TEST_MODE_FULL_BLOCK || mode == NP_TEST_MODE_VERIFY_ONLY))
+            {
+                for (uint32_t p = 0; p < pages_in_block; p++)
+                {
+                    uint32_t cur_page = block_start_page + p;
+                    hal[prog->hal]->read_page(test_read_buf, cur_page, raw_page_size);
+                    nand_generate_prbs_page(cur_page, seed, prog->page.buf, data_page_size);
+
+                    // Verify data
+                    if (memcmp(prog->page.buf, test_read_buf, data_page_size) != 0)
+                    {
+                        block_bad = true;
+                        break;
+                    }
+                    // Verify ECC parity
+                    if (nand_verify_ecc_for_page(test_read_buf, data_page_size, test_read_buf + data_page_size, spare_size) != 0)
+                    {
+                        block_bad = true;
+                        break;
+                    }
+                }
+                if (block_bad)
+                {
+                    if (mark_bad)
+                        nand_re_mark_bad_block(prog, block_start_page);
+                    np_send_bad_block_info(addr, block_size, false);
+                }
+                else if (mode == NP_TEST_MODE_FULL_BLOCK)
+                {
+                    // Clean erase on success in FULL_BLOCK mode
+                    np_nand_erase(prog, block_start_page);
+                }
+            }
+
+            addr += block_size;
+            page += pages_in_block;
+            len -= block_size;
+
+            np_send_progress(total_len - len);
+        }
+    }
+
+    return np_send_ok_status();
+}
+
+static int np_cmd_nand_test(np_prog_t *prog)
+{
+    int ret;
+    led_wr_set(true);
+    ret = _np_cmd_nand_test(prog);
+    led_wr_set(false);
     return ret;
 }
 
@@ -597,8 +1050,8 @@ static int np_cmd_nand_write_start(np_prog_t *prog)
     addr = write_start_cmd->addr;
     len = write_start_cmd->len;
 
-    DEBUG_PRINT("Write at 0x%" PRIx64 " 0x%" PRIx64 " bytes command\r\n",
-        addr, len);
+    DEBUG_PRINT("Write at 0x%llx 0x%llx" " bytes command\r\n",
+        (unsigned long long)addr, (unsigned long long)len);
 
     if (write_start_cmd->flags.inc_spare)
     {
@@ -619,16 +1072,16 @@ static int np_cmd_nand_write_start(np_prog_t *prog)
 
     if (addr + len > prog->total_size)
     {
-        ERROR_PRINT("Write address 0x%" PRIx64 "+0x%" PRIx64
-            " is more then chip size 0x%" PRIx64 "\r\n", addr, len,
-            prog->total_size);
+        ERROR_PRINT("Write address 0x%llx+0x%llx"
+            " is more then chip size 0x%llx" "\r\n", (unsigned long long)addr, (unsigned long long)len,
+            (unsigned long long)prog->total_size);
         return NP_ERR_ADDR_EXCEEDED;
     }
 
     if (addr % prog->page_size)
     {
-        ERROR_PRINT("Address 0x%" PRIx64
-            " is not aligned to page size 0x%lx\r\n", addr, prog->page_size);
+        ERROR_PRINT("Address 0x%llx"
+            " is not aligned to page size 0x%lx\r\n", (unsigned long long)addr, prog->page_size);
         return NP_ERR_ADDR_NOT_ALIGN;
     }
 
@@ -640,8 +1093,8 @@ static int np_cmd_nand_write_start(np_prog_t *prog)
 
     if (len % prog->page_size)
     {
-        ERROR_PRINT("Length 0x%" PRIx64
-            " is not aligned to page size 0x%lx\r\n", len, prog->page_size);
+        ERROR_PRINT("Length 0x%llx"
+            " is not aligned to page size 0x%lx\r\n", (unsigned long long)len, prog->page_size);
         return NP_ERR_LEN_NOT_ALIGN;
     }
 
@@ -687,7 +1140,7 @@ static int np_nand_handle_status(np_prog_t *prog)
     case FLASH_STATUS_BUSY:
         if (++prog->nand_timeout == NP_NAND_TIMEOUT)
         {
-            ERROR_PRINT("NAND write timeout at 0x%" PRIx64 "\r\n", prog->addr);
+            ERROR_PRINT("NAND write timeout at 0x%llx" "\r\n", (unsigned long long)prog->addr);
             prog->nand_wr_in_progress = 0;
             prog->nand_timeout = 0;
             return -1;
@@ -716,7 +1169,7 @@ static int np_nand_write(np_prog_t *prog)
         while (prog->nand_wr_in_progress);
     }
 
-    DEBUG_PRINT("NAND write at 0x%" PRIx64 " %lu bytes\r\n", prog->addr,
+    DEBUG_PRINT("NAND write at 0x%llx" " %lu bytes\r\n", (unsigned long long)prog->addr,
         prog->page_size);
 
     hal[prog->hal]->write_page_async(prog->page.buf, prog->page.page,
@@ -772,7 +1225,7 @@ static int np_cmd_nand_write_data(np_prog_t *prog)
     {
         while (prog->skip_bb && nand_bad_block_table_lookup(prog->page.page))
         {
-            DEBUG_PRINT("Skipped bad block at 0x%" PRIx64 "\r\n", prog->addr);
+            DEBUG_PRINT("Skipped bad block at 0x%llx" "\r\n", (unsigned long long)prog->addr);
             if (np_send_bad_block_info(prog->addr, prog->block_size, true))
                 return -1;
 
@@ -782,9 +1235,9 @@ static int np_cmd_nand_write_data(np_prog_t *prog)
 
         if (prog->addr >= prog->total_size)
         {
-            ERROR_PRINT("Write address 0x%" PRIx64
-                " is more then chip size 0x%" PRIx64 "\r\n", prog->addr,
-                prog->total_size);
+            ERROR_PRINT("Write address 0x%llx"
+                " is more then chip size 0x%llx" "\r\n", (unsigned long long)prog->addr,
+                (unsigned long long)prog->total_size);
             return NP_ERR_ADDR_EXCEEDED;
         }
 
@@ -814,8 +1267,8 @@ static int np_cmd_nand_write_data(np_prog_t *prog)
 
     if (prog->bytes_written > prog->len)
     {
-        ERROR_PRINT("Actual write data length 0x%" PRIx64
-            " is more then 0x%" PRIx64 "\r\n", prog->bytes_written, prog->len);
+        ERROR_PRINT("Actual write data length 0x%llx"
+            " is more then 0x%llx" "\r\n", (unsigned long long)prog->bytes_written, (unsigned long long)prog->len);
         return NP_ERR_LEN_EXCEEDED;
     }
 
@@ -831,6 +1284,12 @@ static int np_cmd_nand_write_end(np_prog_t *prog)
         ERROR_PRINT("Data of 0x%lx length was not written\r\n",
             prog->page.offset);
         return NP_ERR_NAND_WR;
+    }
+
+    while (prog->nand_wr_in_progress)
+    {
+        if (np_nand_handle_status(prog))
+            return NP_ERR_NAND_WR;
     }
 
     return np_send_ok_status();
@@ -879,7 +1338,7 @@ static int np_nand_read(uint64_t addr, np_page_t *page, uint32_t page_size,
             return -1;
         break;
     case FLASH_STATUS_TIMEOUT:
-        ERROR_PRINT("NAND write timeout at 0x%" PRIx64 "\r\n", addr);
+        ERROR_PRINT("NAND write timeout at 0x%llx" "\r\n", (unsigned long long)addr);
         break;
     default:
         ERROR_PRINT("Unknown NAND status\r\n");
@@ -915,7 +1374,7 @@ static int _np_cmd_nand_read(np_prog_t *prog)
     skip_bb = read_cmd->flags.skip_bb;
     inc_spare = read_cmd->flags.inc_spare;
 
-    DEBUG_PRINT("Read at 0x%" PRIx64 " 0x%" PRIx64 " bytes command\r\n", addr,
+    DEBUG_PRINT("Read at 0x%llx 0x%llx" " bytes command\r\n", (unsigned long long)addr,
         len);
 
     if (inc_spare)
@@ -936,15 +1395,15 @@ static int _np_cmd_nand_read(np_prog_t *prog)
 
     if (addr + len > total_size)
     {
-        ERROR_PRINT("Read address 0x%" PRIx64 "+0x%" PRIx64
-            " is more then chip size 0x%" PRIx64 "\r\n", addr, len, total_size);
+        ERROR_PRINT("Read address 0x%llx+0x%llx"
+            " is more then chip size 0x%llx" "\r\n", (unsigned long long)addr, (unsigned long long)len, (unsigned long long)total_size);
         return NP_ERR_ADDR_EXCEEDED;
     }
 
     if (addr % page_size)
     {
-        ERROR_PRINT("Read address 0x%" PRIx64
-            " is not aligned to page size 0x%lx\r\n", addr, page_size);
+        ERROR_PRINT("Read address 0x%llx"
+            " is not aligned to page size 0x%lx\r\n", (unsigned long long)addr, page_size);
         return NP_ERR_ADDR_NOT_ALIGN;
     }
 
@@ -956,8 +1415,8 @@ static int _np_cmd_nand_read(np_prog_t *prog)
 
     if (len % page_size)
     {
-        ERROR_PRINT("Read length 0x%" PRIx64
-            " is not aligned to page size 0x%lx\r\n", len, page_size);
+        ERROR_PRINT("Read length 0x%llx"
+            " is not aligned to page size 0x%lx\r\n", (unsigned long long)len, page_size);
         return NP_ERR_LEN_NOT_ALIGN;
     }
 
@@ -976,14 +1435,14 @@ static int _np_cmd_nand_read(np_prog_t *prog)
     {
         if (addr >= total_size)
         {
-            ERROR_PRINT("Read address 0x%" PRIx64
-                " is more then chip size 0x%" PRIx64 "\r\n", addr, total_size);
+            ERROR_PRINT("Read address 0x%llx"
+                " is more then chip size 0x%llx" "\r\n", (unsigned long long)addr, (unsigned long long)total_size);
             return NP_ERR_ADDR_EXCEEDED;
         }
 
         if (skip_bb && nand_bad_block_table_lookup(page.page))
         {
-            DEBUG_PRINT("Skipped bad block at 0x%" PRIx64 "\r\n", addr);
+            DEBUG_PRINT("Skipped bad block at 0x%llx" "\r\n", (unsigned long long)addr);
             if (np_send_bad_block_info(addr, block_size, true))
                 return -1;
 
@@ -1056,7 +1515,7 @@ static void np_print_chip_info(np_prog_t *prog)
 {
     DEBUG_PRINT("Page size: %lu\r\n", prog->chip_info.page_size);
     DEBUG_PRINT("Block size: %lu\r\n", prog->chip_info.block_size);
-    DEBUG_PRINT("Total size: 0x%" PRIx64 "\r\n", prog->chip_info.total_size);
+    DEBUG_PRINT("Total size: 0x%llx" "\r\n", (unsigned long long)prog->chip_info.total_size);
     DEBUG_PRINT("Spare size: %lu\r\n", prog->chip_info.spare_size);    
     DEBUG_PRINT("Bad block mark offset: %d\r\n", prog->chip_info.bb_mark_off);
 }
@@ -1212,7 +1671,7 @@ static int np_cmd_fw_update_start(np_prog_t *prog)
     addr = write_start_cmd->addr;
     len = write_start_cmd->len;
 
-    DEBUG_PRINT("Write at 0x%" PRIx64 " 0x%" PRIx64 " bytes command\r\n", addr,
+    DEBUG_PRINT("Write at 0x%llx 0x%llx" " bytes command\r\n", (unsigned long long)addr,
         len);
 
     prog->base_addr = FLASH_START_ADDR;
@@ -1222,16 +1681,16 @@ static int np_cmd_fw_update_start(np_prog_t *prog)
 
     if (addr + len > prog->base_addr + prog->total_size)
     {
-        ERROR_PRINT("Write address 0x%" PRIx64 "+0x%" PRIx64
-            " is more then flash size 0x%" PRIx64 "\r\n", addr, len,
-            prog->base_addr + prog->total_size);
+        ERROR_PRINT("Write address 0x%llx+0x%llx"
+            " is more then flash size 0x%llx" "\r\n", (unsigned long long)addr, (unsigned long long)len,
+            (unsigned long long)(prog->base_addr + prog->total_size));
         return NP_ERR_ADDR_EXCEEDED;
     }
 
     if (addr % prog->page_size)
     {
-        ERROR_PRINT("Address 0x%" PRIx64
-            " is not aligned to page size 0x%lx\r\n", addr, prog->page_size);
+        ERROR_PRINT("Address 0x%llx"
+            " is not aligned to page size 0x%lx\r\n", (unsigned long long)addr, prog->page_size);
         return NP_ERR_ADDR_NOT_ALIGN;
     }
 
@@ -1243,8 +1702,8 @@ static int np_cmd_fw_update_start(np_prog_t *prog)
 
     if (len % prog->page_size)
     {
-        ERROR_PRINT("Length 0x%" PRIx64
-            " is not aligned to page size 0x%lx\r\n", len, prog->page_size);
+        ERROR_PRINT("Length 0x%llx"
+            " is not aligned to page size 0x%lx\r\n", (unsigned long long)len, prog->page_size);
         return NP_ERR_LEN_NOT_ALIGN;
     }
 
@@ -1278,14 +1737,14 @@ static int np_cmd_fw_update_data(np_prog_t *prog)
     len = write_data_cmd->len;
     if (len + sizeof(np_write_data_cmd_t) > NP_PACKET_BUF_SIZE)
     {
-        ERROR_PRINT("Data size is wrong 0x%" PRIx64 "\r\n", len);
+        ERROR_PRINT("Data size is wrong 0x%llx" "\r\n", (unsigned long long)len);
         return NP_ERR_CMD_DATA_SIZE;
     }
 
     if (len + sizeof(np_write_data_cmd_t) != prog->rx_buf_len)
     {
-        ERROR_PRINT("Buffer len 0x%lx is bigger then command 0x%" PRIx64 "\r\n",
-            prog->rx_buf_len, len + sizeof(np_write_data_cmd_t));
+        ERROR_PRINT("Buffer len 0x%lx is bigger then command 0x%lx\r\n",
+            prog->rx_buf_len, (unsigned long)len + sizeof(np_write_data_cmd_t));
         return NP_ERR_CMD_DATA_SIZE;
     }
 
@@ -1307,9 +1766,9 @@ static int np_cmd_fw_update_data(np_prog_t *prog)
     {
         if (prog->addr >= prog->base_addr + prog->total_size)
         {
-            ERROR_PRINT("Write address 0x%" PRIx64
-                " is more then flash size 0x%" PRIx64 "\r\n",
-                prog->addr, prog->base_addr + prog->total_size);
+            ERROR_PRINT("Write address 0x%llx"
+                " is more then flash size 0x%llx" "\r\n",
+                (unsigned long long)prog->addr, (unsigned long long)(prog->base_addr + prog->total_size));
             return NP_ERR_ADDR_EXCEEDED;
         }
 
@@ -1345,8 +1804,8 @@ static int np_cmd_fw_update_data(np_prog_t *prog)
 
     if (prog->bytes_written > prog->len)
     {
-        ERROR_PRINT("Actual write data length 0x%" PRIx64
-            " is more then 0x%" PRIx64 "\r\n", prog->bytes_written, prog->len);
+        ERROR_PRINT("Actual write data length 0x%llx"
+            " is more then 0x%llx" "\r\n", (unsigned long long)prog->bytes_written, (unsigned long long)prog->len);
         return NP_ERR_LEN_EXCEEDED;
     }
 
@@ -1406,6 +1865,70 @@ static int np_cmd_fw_update(np_prog_t *prog)
     return ret;
 }
 
+static int np_cmd_nand_probe_onfi(np_prog_t *prog)
+{
+    onfi_param_page_t onfi;
+    if (fsmc_nand_read_onfi(&onfi) != 0)
+    {
+        return NP_ERR_CHIP_NOT_CONF;
+    }
+
+    prog->chip_info.page_size = onfi.page_data_bytes;
+    prog->chip_info.spare_size = onfi.page_spare_bytes;
+    prog->chip_info.block_size = onfi.pages_per_block * onfi.page_data_bytes;
+    prog->chip_info.total_size = (uint64_t)onfi.blocks_per_lun * onfi.lun_count * prog->chip_info.block_size;
+    prog->chip_info.bb_mark_off = 0;
+
+    prog->page_size = prog->chip_info.page_size;
+    prog->block_size = prog->chip_info.block_size;
+    prog->total_size = prog->chip_info.total_size;
+
+    fsmc_conf_t auto_conf;
+    memset(&auto_conf, 0, sizeof(auto_conf));
+    auto_conf.setup_time = 20;
+    auto_conf.wait_setup_time = 12;
+    auto_conf.hold_setup_time = 12;
+    auto_conf.hi_z_setup_time = 10;
+    auto_conf.clr_setup_time = 10;
+    auto_conf.ar_setup_time = 12;
+    auto_conf.row_cycles = onfi.address_cycles & 0x0F;
+    auto_conf.col_cycles = (onfi.address_cycles >> 4) & 0x0F;
+    auto_conf.read1_cmd = 0x00;
+    auto_conf.read2_cmd = 0x30;
+    auto_conf.read_spare_cmd = 0xFF;
+    auto_conf.read_id_cmd = 0x90;
+    auto_conf.reset_cmd = 0xFF;
+    auto_conf.write1_cmd = 0x80;
+    auto_conf.write2_cmd = 0x10;
+    auto_conf.erase1_cmd = 0x60;
+    auto_conf.erase2_cmd = 0xD0;
+    auto_conf.status_cmd = 0x70;
+    auto_conf.set_features_cmd = 0xEF;
+    auto_conf.enable_ecc_addr = 0x90;
+    auto_conf.enable_ecc_value = 0x08;
+    auto_conf.disable_ecc_value = 0x00;
+
+    hal[0]->init(&auto_conf, sizeof(auto_conf));
+    prog->hal = 0;
+    prog->chip_is_conf = 1;
+    prog->bb_is_read = 0;
+    nand_bad_block_table_init();
+
+    np_resp_onfi_t resp;
+    resp.header.code = NP_RESP_DATA;
+    resp.header.info = sizeof(resp) - sizeof(resp.header);
+    memcpy(resp.manufacturer, onfi.manufacturer, 12);
+    memcpy(resp.model, onfi.model, 20);
+    resp.page_size = prog->chip_info.page_size;
+    resp.block_size = prog->chip_info.block_size;
+    resp.total_size = prog->chip_info.total_size;
+    resp.spare_size = prog->chip_info.spare_size;
+    resp.row_cycles = auto_conf.row_cycles;
+    resp.col_cycles = auto_conf.col_cycles;
+
+    return np_comm_cb->send((uint8_t *)&resp, sizeof(resp));
+}
+
 static np_cmd_handler_t cmd_handler[] =
 {
     { NP_CMD_NAND_READ_ID, 1, np_cmd_nand_read_id },
@@ -1420,7 +1943,13 @@ static np_cmd_handler_t cmd_handler[] =
     { NP_CMD_ACTIVE_IMAGE_GET, 0, np_cmd_active_image_get },
     { NP_CMD_FW_UPDATE_S, 0, np_cmd_fw_update },
     { NP_CMD_FW_UPDATE_D, 0, np_cmd_fw_update },
-    { NP_CMD_FW_UPDATE_E, 0, np_cmd_fw_update },    
+    { NP_CMD_FW_UPDATE_E, 0, np_cmd_fw_update },
+    { 0x0d, 0, NULL },
+    { 0x0e, 0, NULL },
+    { 0x0f, 0, NULL },
+    { NP_CMD_NAND_SCRUB, 1, np_cmd_nand_scrub },
+    { NP_CMD_NAND_TEST, 1, np_cmd_nand_test },
+    { NP_CMD_NAND_PROBE_ONFI, 0, np_cmd_nand_probe_onfi },
 };
 
 static bool np_cmd_is_valid(np_cmd_code_t code)
@@ -1450,6 +1979,12 @@ static int np_cmd_handler(np_prog_t *prog)
     {
         ERROR_PRINT("Chip is not configured\r\n");
         return NP_ERR_CHIP_NOT_CONF;
+    }
+
+    if (!cmd_handler[cmd->code].exec)
+    {
+        ERROR_PRINT("Command %d has no handler\r\n", cmd->code);
+        return NP_ERR_CMD_INVALID;
     }
 
     return cmd_handler[cmd->code].exec(prog);

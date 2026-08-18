@@ -99,6 +99,50 @@ void test_protocol_encoding() {
     require(range[9] == 0x18 && range[16] == 0x11,
             "range length must be little endian");
     require(range[17] == 2, "raw flags must only set include-spare");
+
+    const auto scrub_packet = nandprog::protocol::encode_scrub(0x0, 0x8000000);
+    require(scrub_packet.size() == 17, "scrub packet size");
+    require(scrub_packet[0] == 0x10, "scrub opcode 0x10");
+
+    const auto test_packet_block = nandprog::protocol::encode_test(
+        0x0, 0x8000000, nandprog::protocol::TestMode::full_block, true, 0x12345678);
+    require(test_packet_block.size() == 23, "test packet size");
+    require(test_packet_block[0] == 0x11, "test opcode 0x11");
+    require(test_packet_block[17] == 0, "test mode full_block (0)");
+    require(test_packet_block[18] == 1, "test mark bad true");
+
+    const auto test_packet_chip = nandprog::protocol::encode_test(
+        0x0, 0x8000000, nandprog::protocol::TestMode::full_chip, false, 0xA5A55A5A);
+    require(test_packet_chip.size() == 23, "test packet size");
+    require(test_packet_chip[0] == 0x11, "test opcode 0x11");
+    require(test_packet_chip[17] == 3, "test mode full_chip (3)");
+    require(test_packet_chip[18] == 0, "test mark bad false");
+
+    // Test ONFI payload decoding
+    std::vector<std::uint8_t> onfi_payload(54, 0);
+    std::memcpy(onfi_payload.data(), "MICRON      ", 12);
+    std::memcpy(onfi_payload.data() + 12, "MT29F2G08ABAEA      ", 20);
+    // page_size = 2048 (0x00000800)
+    onfi_payload[32] = 0x00; onfi_payload[33] = 0x08; onfi_payload[34] = 0x00; onfi_payload[35] = 0x00;
+    // block_size = 131072 (0x00020000)
+    onfi_payload[36] = 0x00; onfi_payload[37] = 0x00; onfi_payload[38] = 0x02; onfi_payload[39] = 0x00;
+    // total_size = 268435456 (0x10000000)
+    onfi_payload[40] = 0x00; onfi_payload[41] = 0x00; onfi_payload[42] = 0x00; onfi_payload[43] = 0x10;
+    // spare_size = 64
+    onfi_payload[48] = 64;
+    // row_cycles = 3, col_cycles = 2
+    onfi_payload[52] = 3;
+    onfi_payload[53] = 2;
+
+    const auto decoded_onfi = nandprog::protocol::decode_onfi(onfi_payload);
+    require(decoded_onfi.manufacturer == "MICRON", "ONFI decoded manufacturer");
+    require(decoded_onfi.model == "MT29F2G08ABAEA", "ONFI decoded model");
+    require(decoded_onfi.page_size == 2048, "ONFI decoded page size");
+    require(decoded_onfi.spare_size == 64, "ONFI decoded spare size");
+    require(decoded_onfi.block_size == 131072, "ONFI decoded block size");
+    require(decoded_onfi.total_size == 268435456ULL, "ONFI decoded total size");
+    require(decoded_onfi.row_cycles == 3, "ONFI decoded row cycles");
+    require(decoded_onfi.col_cycles == 2, "ONFI decoded col cycles");
 }
 
 void test_database() {

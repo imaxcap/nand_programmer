@@ -47,6 +47,21 @@ protocol::ChipId NandClient::read_id() {
     return {response.payload};
 }
 
+std::optional<protocol::OnfiInfo> NandClient::probe_onfi() {
+    transport_.write_packet(
+        protocol::encode_simple(protocol::Command::probe_onfi),
+        control_timeout_ms);
+    try {
+        const auto response = protocol::read_response(transport_, control_timeout_ms);
+        if (response.code == protocol::ResponseCode::data) {
+            return protocol::decode_onfi(response.payload);
+        }
+    } catch (...) {
+        return std::nullopt;
+    }
+    return std::nullopt;
+}
+
 void NandClient::configure(const Chip &chip) {
     transport_.write_packet(
         protocol::encode_configure(0, chip.page_size, chip.block_size,
@@ -164,6 +179,79 @@ void NandClient::erase(std::uint64_t address, std::uint64_t length,
     }
 }
 
+void NandClient::scrub(std::uint64_t address, std::uint64_t length,
+                        const ProgressCallback &on_progress,
+                        const BadBlockCallback &on_bad_block) {
+    if (length == 0)
+        throw Error("Scrub length must not be zero");
+    transport_.write_packet(
+        protocol::encode_scrub(address, length),
+        control_timeout_ms);
+
+    while (true) {
+        const auto response = protocol::read_response(transport_, operation_timeout_ms);
+        switch (response_status(response)) {
+        case protocol::Status::ok:
+            return;
+        case protocol::Status::error:
+            throw_firmware_error(response);
+        case protocol::Status::bad_block:
+            if (on_bad_block)
+                on_bad_block(decode_bad_block(response, false));
+            break;
+        case protocol::Status::bad_block_skip:
+            if (on_bad_block)
+                on_bad_block(decode_bad_block(response, true));
+            break;
+        case protocol::Status::progress:
+            if (response.payload.size() != 8)
+                throw Error("Invalid scrub progress response");
+            if (on_progress)
+                on_progress(protocol::decode_u64(response.payload.data()));
+            break;
+        default:
+            throw Error("Unexpected status during NAND scrub");
+        }
+    }
+}
+
+void NandClient::nand_test(std::uint64_t address, std::uint64_t length,
+                           protocol::TestMode mode, bool mark_bad, std::uint32_t seed,
+                           const ProgressCallback &on_progress,
+                           const BadBlockCallback &on_bad_block) {
+    if (length == 0)
+        throw Error("Test length must not be zero");
+    transport_.write_packet(
+        protocol::encode_test(address, length, mode, mark_bad, seed),
+        control_timeout_ms);
+
+    while (true) {
+        const auto response = protocol::read_response(transport_, operation_timeout_ms);
+        switch (response_status(response)) {
+        case protocol::Status::ok:
+            return;
+        case protocol::Status::error:
+            throw_firmware_error(response);
+        case protocol::Status::bad_block:
+            if (on_bad_block)
+                on_bad_block(decode_bad_block(response, false));
+            break;
+        case protocol::Status::bad_block_skip:
+            if (on_bad_block)
+                on_bad_block(decode_bad_block(response, true));
+            break;
+        case protocol::Status::progress:
+            if (response.payload.size() != 8)
+                throw Error("Invalid test progress response");
+            if (on_progress)
+                on_progress(protocol::decode_u64(response.payload.data()));
+            break;
+        default:
+            throw Error("Unexpected status during NAND test");
+        }
+    }
+}
+
 void NandClient::write(std::istream &input, std::uint64_t address,
                        std::uint64_t length,
                        std::uint32_t transfer_page_size,
@@ -219,6 +307,8 @@ void NandClient::write_pages(const PageProvider &provide_page,
         log_debug("write_pages: sending page at offset=" + hex_number(address + transferred) +
                   " (bytes=" + std::to_string(transferred) + "/" + std::to_string(length) + ")");
 
+        std::vector<std::uint8_t> page_packets;
+        page_packets.reserve(((page.size() + protocol::max_write_payload - 1) / protocol::max_write_payload) * 64);
         std::size_t page_offset = 0;
         unsigned chunk_index = 0;
         while (page_offset < page.size()) {
@@ -226,12 +316,11 @@ void NandClient::write_pages(const PageProvider &provide_page,
                 protocol::max_write_payload, page.size() - page_offset);
             log_debug("write_pages: chunk #" + std::to_string(chunk_index++) +
                       " offset=" + std::to_string(page_offset) + " size=" + std::to_string(chunk_size));
-            transport_.write_packet(
-                protocol::encode_write_data(page.data() + page_offset,
-                                            chunk_size),
-                control_timeout_ms);
+            const auto chunk_pkt = protocol::encode_write_data(page.data() + page_offset, chunk_size);
+            page_packets.insert(page_packets.end(), chunk_pkt.begin(), chunk_pkt.end());
             page_offset += chunk_size;
         }
+        transport_.write_buffer(page_packets, control_timeout_ms);
 
         const std::uint64_t expected_ack = transferred + page.size();
         log_debug("write_pages: page upload finished, waiting for write_ack (expected=" +

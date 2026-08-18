@@ -32,6 +32,7 @@ private:
     NandClient client_;
     ChipDatabase database_;
     const Chip *chip_ = nullptr;
+    std::optional<Chip> dynamic_chip_;
     protocol::FirmwareVersion firmware_version_{};
     protocol::ChipId chip_id_{};
     bool probed_ = false;
@@ -39,12 +40,15 @@ private:
 
     void ensure_open();
     void ensure_probe();
+    void ensure_firmware_version(unsigned min_major, unsigned min_minor, const std::string &feature_name);
     std::optional<mibib::PartitionTable> read_mibib_table(bool force_refresh = false);
     void command_id(const std::vector<std::string> &arguments);
     void command_probe(const std::vector<std::string> &arguments);
     void command_info() const;
     void command_read(const std::vector<std::string> &arguments, bool raw);
     void command_erase(const std::vector<std::string> &arguments);
+    void command_scrub(const std::vector<std::string> &arguments);
+    void command_test(const std::vector<std::string> &arguments);
     void command_write(const std::vector<std::string> &arguments, bool raw);
     void command_write_qpic(const std::vector<std::string> &arguments);
     void command_read_qpic(const std::vector<std::string> &arguments);

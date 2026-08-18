@@ -5,6 +5,7 @@
 #include "nandprog/util.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -12,41 +13,150 @@
 #include <limits>
 #include <optional>
 #include <sstream>
+#include <thread>
 
 namespace nandprog {
 namespace {
 
+inline std::optional<unsigned> parse_duration_seconds(const std::string &str) {
+    if (str.empty())
+        return std::nullopt;
+    unsigned multiplier = 1;
+    std::string num_str = str;
+    char unit = str.back();
+    if (unit == 's' || unit == 'S') {
+        multiplier = 1;
+        num_str.pop_back();
+    } else if (unit == 'm' || unit == 'M') {
+        multiplier = 60;
+        num_str.pop_back();
+    } else if (unit == 'h' || unit == 'H') {
+        multiplier = 3600;
+        num_str.pop_back();
+    }
+    try {
+        return static_cast<unsigned>(std::stoul(num_str) * multiplier);
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
+inline std::string format_data_size(std::uint64_t bytes) {
+    std::ostringstream ss;
+    ss << std::fixed << std::setprecision(2);
+    if (bytes >= 1024ULL * 1024ULL * 1024ULL) {
+        ss << (static_cast<double>(bytes) / (1024.0 * 1024.0 * 1024.0)) << " GiB";
+    } else if (bytes >= 1024ULL * 1024ULL) {
+        ss << (static_cast<double>(bytes) / (1024.0 * 1024.0)) << " MiB";
+    } else if (bytes >= 1024ULL) {
+        ss << (static_cast<double>(bytes) / 1024.0) << " KiB";
+    } else {
+        ss << bytes << " B";
+    }
+    return ss.str();
+}
+
+inline std::string format_throughput(double bytes_per_sec) {
+    std::ostringstream ss;
+    ss << std::fixed << std::setprecision(2);
+    if (bytes_per_sec >= 1024.0 * 1024.0) {
+        ss << (bytes_per_sec / (1024.0 * 1024.0)) << " MB/s";
+    } else if (bytes_per_sec >= 1024.0) {
+        ss << (bytes_per_sec / 1024.0) << " KB/s";
+    } else {
+        ss << bytes_per_sec << " B/s";
+    }
+    return ss.str();
+}
+
+inline std::string format_duration(double seconds) {
+    std::ostringstream ss;
+    ss << std::fixed << std::setprecision(1);
+    if (seconds >= 60.0) {
+        const unsigned minutes = static_cast<unsigned>(seconds) / 60;
+        const double rem_sec = seconds - minutes * 60.0;
+        ss << minutes << "m " << rem_sec << "s";
+    } else {
+        ss << seconds << "s";
+    }
+    return ss.str();
+}
+
 class ProgressDisplay {
 public:
     ProgressDisplay(std::string operation, std::uint64_t total)
-        : operation_(std::move(operation)), total_(total) {}
+        : operation_(std::move(operation)), total_(total),
+          start_time_(std::chrono::steady_clock::now()),
+          last_update_time_(start_time_) {}
 
     void update(std::uint64_t value) {
         if (total_ == 0)
             return;
+        const auto now = std::chrono::steady_clock::now();
         const unsigned percent = static_cast<unsigned>(
             std::min<std::uint64_t>(100, value * 100 / total_));
-        if (percent == last_percent_)
+
+        const double elapsed_since_last =
+            std::chrono::duration<double>(now - last_update_time_).count();
+        if (percent == last_percent_ && elapsed_since_last < 0.15)
             return;
+
         last_percent_ = percent;
+        last_update_time_ = now;
+
+        const double elapsed =
+            std::chrono::duration<double>(now - start_time_).count();
+        const double speed = (elapsed > 0.001)
+                                 ? (static_cast<double>(value) / elapsed)
+                                 : 0.0;
+
         std::cerr << '\r' << operation_ << ": " << std::setw(3) << percent
-                  << "%" << std::flush;
+                  << "% (" << format_data_size(value) << " / "
+                  << format_data_size(total_) << ", "
+                  << format_throughput(speed) << ")    " << std::flush;
     }
 
     void finish() {
-        update(total_);
-        std::cerr << '\n';
+        const auto now = std::chrono::steady_clock::now();
+        const double elapsed =
+            std::chrono::duration<double>(now - start_time_).count();
+        const double avg_speed = (elapsed > 0.001)
+                                     ? (static_cast<double>(total_) / elapsed)
+                                     : 0.0;
+
+        std::cerr << '\r' << operation_ << ": 100% ["
+                  << format_data_size(total_) << " in "
+                  << format_duration(elapsed) << ", "
+                  << format_throughput(avg_speed) << "]          \n"
+                  << std::flush;
     }
+
+    void log_bad_block(const BadBlockEvent &event) {
+        ++bad_blocks_;
+        std::ostringstream ss;
+        ss << (event.skipped ? "[WARN] Skipped bad block at "
+                             : "[WARN] Bad block reported at ")
+           << hex_number(event.address) << ", size "
+           << hex_number(event.size);
+        std::cerr << "\r" << std::string(79, ' ') << "\r" << ss.str() << '\n'
+                  << std::flush;
+        last_percent_ = std::numeric_limits<unsigned>::max();
+    }
+
+    std::size_t bad_blocks() const noexcept { return bad_blocks_; }
 
 private:
     std::string operation_;
     std::uint64_t total_;
     unsigned last_percent_ = std::numeric_limits<unsigned>::max();
+    std::size_t bad_blocks_ = 0;
+    std::chrono::steady_clock::time_point start_time_;
+    std::chrono::steady_clock::time_point last_update_time_;
 };
 
 void print_bad_block(const BadBlockEvent &event) {
-    std::cerr << "\n" << (event.skipped ? "Skipped bad block at "
-                                           : "Bad block reported at ")
+    std::cerr << (event.skipped ? "[WARN] Skipped bad block at "
+                                : "[WARN] Bad block reported at ")
               << hex_number(event.address) << ", size "
               << hex_number(event.size) << '\n';
 }
@@ -148,6 +258,10 @@ int CommandShell::execute(const std::vector<std::string> &arguments) {
         command_read(arguments, true);
     else if (command == "erase")
         command_erase(arguments);
+    else if (command == "scrub")
+        command_scrub(arguments);
+    else if (command == "test" || command == "nandtest" || command == "test.write" || command == "test.verify")
+        command_test(arguments);
     else if (command == "write")
         command_write(arguments, false);
     else if (command == "write.raw")
@@ -189,6 +303,21 @@ void CommandShell::ensure_probe() {
         command_probe({"probe"});
 }
 
+void CommandShell::ensure_firmware_version(unsigned min_major, unsigned min_minor,
+                                           const std::string &feature_name) {
+    ensure_probe();
+    if (firmware_version_.major < min_major ||
+        (firmware_version_.major == min_major && firmware_version_.minor < min_minor)) {
+        throw Error("Command '" + feature_name + "' requires firmware v" +
+                    std::to_string(min_major) + "." + std::to_string(min_minor) +
+                    ".0 or later (device is currently running v" +
+                    std::to_string(firmware_version_.major) + "." +
+                    std::to_string(firmware_version_.minor) + "." +
+                    std::to_string(firmware_version_.build) + ").\n" +
+                    "Please update your STM32 firmware to v3.6.0 to use this command.");
+    }
+}
+
 void CommandShell::command_id(const std::vector<std::string> &arguments) {
     if (arguments.size() != 1)
         throw Error("Usage: id");
@@ -224,27 +353,72 @@ void CommandShell::command_probe(const std::vector<std::string> &arguments) {
             throw Error("Chip not found in database: " + *forced);
         client_.configure(*chip_);
         chip_id_ = client_.read_id();
+        print_firmware_version(firmware_version_);
+        print_chip_id(chip_id_);
     } else {
         client_.configure(database_.first());
         chip_id_ = client_.read_id();
         print_firmware_version(firmware_version_);
         print_chip_id(chip_id_);
-        chip_ = database_.find_by_id(chip_id_);
-        if (chip_ == nullptr) {
-            std::ostringstream message;
-            message << "Unknown NAND ID:" << format_chip_id(chip_id_);
-            message << "; add it to the database or use 'probe CHIP-NAME'";
-            throw Error(message.str());
+
+        auto onfi = client_.probe_onfi();
+        if (onfi) {
+            std::cout << "[ONFI 1.0 Match] Manufacturer: " << (onfi->manufacturer.empty() ? "Generic" : onfi->manufacturer)
+                      << ", Model: " << (onfi->model.empty() ? "ONFI NAND" : onfi->model) << '\n';
+            Chip c;
+            c.name = onfi->model.empty() ? onfi->manufacturer : onfi->model;
+            c.page_size = onfi->page_size;
+            c.spare_size = onfi->spare_size;
+            c.block_size = onfi->block_size;
+            c.total_size = onfi->total_size;
+            c.bad_block_mark_offset = 0;
+            c.parameters.fill(0);
+            c.parameters[0] = 20; // t_cs
+            c.parameters[1] = 12; // t_cls
+            c.parameters[2] = 12; // t_als
+            c.parameters[3] = 10; // t_clr
+            c.parameters[4] = 10; // t_ar
+            c.parameters[5] = 12; // t_wp
+            c.parameters[6] = 12; // t_rp
+            c.parameters[7] = 12; // t_ds
+            c.parameters[8] = 5;  // t_ch
+            c.parameters[9] = 5;  // t_clh
+            c.parameters[10] = 5; // t_alh
+            c.parameters[11] = 25;// t_wc
+            c.parameters[12] = 25;// t_rc
+            c.parameters[13] = 20;// t_rea
+            c.parameters[14] = onfi->row_cycles;
+            c.parameters[15] = onfi->col_cycles;
+            c.parameters[16] = 0x00; // read1
+            c.parameters[17] = 0x30; // read2
+            c.parameters[18] = 0xFF; // read_spare
+            c.parameters[19] = 0x90; // read_id
+            c.parameters[20] = 0xFF; // reset
+            c.parameters[21] = 0x80; // write1
+            c.parameters[22] = 0x10; // write2
+            c.parameters[23] = 0x60; // erase1
+            c.parameters[24] = 0xD0; // erase2
+            c.parameters[25] = 0x70; // status
+            c.parameters[26] = 0xEF; // set_features
+            c.parameters[27] = 0x90; // enable_ecc_address
+            c.parameters[28] = 0x08; // enable_ecc_value
+            c.parameters[29] = 0x00; // disable_ecc_value
+            dynamic_chip_ = c;
+            chip_ = &(*dynamic_chip_);
+        } else {
+            chip_ = database_.find_by_id(chip_id_);
+            if (chip_ == nullptr) {
+                std::ostringstream message;
+                message << "Unknown NAND ID:" << format_chip_id(chip_id_);
+                message << "; add it to the database or use 'probe CHIP-NAME'";
+                throw Error(message.str());
+            }
+            client_.configure(*chip_);
         }
-        client_.configure(*chip_);
     }
 
     cached_mibib_ = std::nullopt;
     probed_ = true;
-    if (forced) {
-        print_firmware_version(firmware_version_);
-        print_chip_id(chip_id_);
-    }
     std::cout << "Detected: " << chip_->name << '\n';
 }
 
@@ -320,7 +494,7 @@ void CommandShell::command_read(const std::vector<std::string> &arguments,
                 throw Error("Failed to write output file");
         },
         [&progress](std::uint64_t value) { progress.update(value); },
-        print_bad_block);
+        [&progress](const BadBlockEvent &event) { progress.log_bad_block(event); });
     output.close();
     if (!output)
         throw Error("Failed to finalize output file: " + arguments[1]);
@@ -347,15 +521,247 @@ void CommandShell::command_erase(const std::vector<std::string> &arguments) {
     if (address >= chip_->total_size || length > chip_->total_size - address)
         throw Error("Erase range is outside the chip");
 
+    const std::uint64_t block_count = length / chip_->block_size;
+    std::cout << "Erasing " << (erase_all ? "entire chip" : "range") << " [offset "
+              << hex_number(address) << ", length " << hex_number(length)
+              << " (" << format_data_size(length) << ", " << block_count << " blocks)]...\n";
+
     transport_->flush();
     ProgressDisplay progress("erase", length);
     protocol::Flags flags;
     flags.skip_bad = true;
     client_.erase(address, length, flags,
                   [&progress](std::uint64_t value) { progress.update(value); },
-                  print_bad_block);
+                  [&progress](const BadBlockEvent &event) { progress.log_bad_block(event); });
     progress.finish();
-    std::cout << "Erase completed\n";
+
+    if (progress.bad_blocks() > 0) {
+        std::cout << "Erase completed successfully (" << block_count << " blocks, "
+                  << progress.bad_blocks() << " bad blocks skipped)\n";
+    } else {
+        std::cout << "Erase completed successfully (" << block_count << " blocks)\n";
+    }
+}
+
+void CommandShell::command_scrub(const std::vector<std::string> &arguments) {
+    ensure_firmware_version(3, 6, "scrub");
+
+    bool scrub_all = (arguments.size() == 1 || (arguments.size() == 2 && arguments[1] == "all"));
+    std::uint64_t address = 0;
+    std::uint64_t length = chip_->total_size;
+
+    if (!scrub_all) {
+        if (arguments.size() != 3)
+            throw Error("Usage: scrub [all | OFFSET LENGTH]");
+        address = parse_number(arguments[1]);
+        length = parse_number(arguments[2]);
+    }
+
+    if (address % chip_->block_size != 0 || length == 0 ||
+        length % chip_->block_size != 0)
+        throw Error("Scrub offset and length must be block aligned");
+    if (address >= chip_->total_size || length > chip_->total_size - address)
+        throw Error("Scrub range is outside the chip");
+
+    const std::uint64_t block_count = length / chip_->block_size;
+
+    std::cerr << "\n"
+              << "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n"
+              << "!! WARNING: SCRUB WILL UNCONDITIONALLY ERASE ALL PHYSICAL BLOCKS!!\n"
+              << "!! THIS WILL DESTROY FACTORY BAD BLOCK MARKERS IN OOB!          !!\n"
+              << "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n"
+              << "Target: " << (scrub_all ? "entire chip" : "range") << " [offset "
+              << hex_number(address) << ", length " << hex_number(length)
+              << " (" << format_data_size(length) << ", " << block_count << " blocks)]\n\n"
+              << "Type 'YES' to proceed with physical scrub: " << std::flush;
+
+    std::string confirm;
+    if (std::cin >> confirm && confirm != "YES") {
+        std::cout << "Scrub cancelled.\n";
+        return;
+    }
+
+    std::cout << "Scrubbing " << (scrub_all ? "entire chip" : "range") << " [offset "
+              << hex_number(address) << ", length " << hex_number(length)
+              << " (" << format_data_size(length) << ", " << block_count << " blocks)]...\n";
+
+    transport_->flush();
+    ProgressDisplay progress("scrub", length);
+    client_.scrub(address, length,
+                  [&progress](std::uint64_t value) { progress.update(value); },
+                  [&progress](const BadBlockEvent &event) { progress.log_bad_block(event); });
+    progress.finish();
+
+    std::cout << "Scrub completed successfully (" << block_count << " physical blocks erased)\n";
+}
+
+void CommandShell::command_test(const std::vector<std::string> &arguments) {
+    ensure_firmware_version(3, 6, "test");
+
+    const std::string &cmd_name = arguments.front();
+    protocol::TestMode mode = protocol::TestMode::full_chip; // default to full-disk RDT spanning
+    if (cmd_name == "test.write")
+        mode = protocol::TestMode::write_only;
+    else if (cmd_name == "test.verify")
+        mode = protocol::TestMode::verify_only;
+
+    unsigned passes = 1;
+    bool mark_bad = true; // default is true!
+    std::optional<std::uint32_t> custom_seed;
+    std::optional<unsigned> delay_seconds;
+    std::vector<std::string> pos_args;
+
+    for (std::size_t i = 1; i < arguments.size(); ++i) {
+        const std::string &arg = arguments[i];
+        if (arg == "--no-mark-bad") {
+            mark_bad = false;
+        } else if (arg == "--mark-bad") {
+            mark_bad = true;
+        } else if (arg == "--mode" || arg == "-m") {
+            if (++i >= arguments.size())
+                throw Error("Option --mode requires 'block' (per-block) or 'chip'/'rdt' (full-disk write-then-read)");
+            if (arguments[i] == "block" || arguments[i] == "per-block")
+                mode = protocol::TestMode::full_block;
+            else if (arguments[i] == "chip" || arguments[i] == "rdt" || arguments[i] == "full")
+                mode = protocol::TestMode::full_chip;
+            else
+                throw Error("Unknown test mode: " + arguments[i] + "; use 'block' or 'chip'");
+        } else if (arg == "--per-block" || arg == "--block" || arg == "-b") {
+            mode = protocol::TestMode::full_block;
+        } else if (arg == "--rdt" || arg == "--full-chip") {
+            mode = protocol::TestMode::full_chip;
+        } else if (arg == "--passes" || arg == "-p") {
+            if (++i >= arguments.size())
+                throw Error("Option --passes requires an integer count");
+            passes = static_cast<unsigned>(parse_number(arguments[i]));
+            if (passes == 0)
+                throw Error("Test passes count must be >= 1");
+        } else if (arg == "--seed" || arg == "-s") {
+            if (++i >= arguments.size())
+                throw Error("Option --seed requires a 32-bit number");
+            custom_seed = static_cast<std::uint32_t>(parse_number(arguments[i]));
+        } else if (arg == "--delay" || arg == "-d") {
+            if (++i >= arguments.size())
+                throw Error("Option --delay requires a duration (e.g. 10m or 60s)");
+            auto dur = parse_duration_seconds(arguments[i]);
+            if (!dur)
+                throw Error("Invalid delay duration: " + arguments[i]);
+            delay_seconds = *dur;
+        } else {
+            pos_args.push_back(arg);
+        }
+    }
+
+    std::uint64_t address = 0;
+    std::uint64_t length = chip_->total_size;
+    std::string target_desc = "entire chip";
+
+    if (!pos_args.empty() && pos_args[0] != "all") {
+        auto table = read_mibib_table(false);
+        bool found_part = false;
+        if (table) {
+            for (const auto &part : table->partitions) {
+                if (part.name == pos_args[0] || part.name == ("0:" + pos_args[0])) {
+                    address = part.start_offset;
+                    length = (pos_args.size() >= 2) ? parse_number(pos_args[1]) : part.size_bytes;
+                    target_desc = "partition '" + part.name + "'";
+                    found_part = true;
+                    break;
+                }
+            }
+        }
+        if (!found_part) {
+            address = parse_number(pos_args[0]);
+            if (pos_args.size() < 2)
+                throw Error("Length is required when testing by offset: test OFFSET LENGTH");
+            length = parse_number(pos_args[1]);
+            target_desc = "offset " + hex_number(address);
+        }
+    }
+
+    if (address % chip_->block_size != 0 || length == 0 || length % chip_->block_size != 0)
+        throw Error("Test offset and length must be block aligned");
+    if (address >= chip_->total_size || length > chip_->total_size - address)
+        throw Error("Test range is outside the chip");
+
+    const std::uint64_t block_count = length / chip_->block_size;
+    const std::uint32_t base_seed = custom_seed.value_or(0x5A5AA5A5U);
+
+    if (delay_seconds && (mode == protocol::TestMode::full_chip || mode == protocol::TestMode::full_block)) {
+        std::cout << "Starting retention self-test on " << target_desc << " [offset "
+                  << hex_number(address) << ", length " << hex_number(length)
+                  << " (" << format_data_size(length) << ", " << block_count << " blocks)]...\n";
+
+        std::cout << "\n[Phase 1/2] Writing PRBS32 random pattern + ECC (seed: "
+                  << hex_number(base_seed) << ")...\n";
+        transport_->flush();
+        ProgressDisplay write_prog("test.write", length);
+        client_.nand_test(address, length, protocol::TestMode::write_only, mark_bad, base_seed,
+                          [&write_prog](std::uint64_t val) { write_prog.update(val); },
+                          [&write_prog](const BadBlockEvent &ev) { write_prog.log_bad_block(ev); });
+        write_prog.finish();
+
+        std::cout << "\n[Retention Window] Waiting for " << format_duration(*delay_seconds)
+                  << " for charge retention testing...\n";
+        const auto start_wait = std::chrono::steady_clock::now();
+        const auto end_wait = start_wait + std::chrono::seconds(*delay_seconds);
+        while (std::chrono::steady_clock::now() < end_wait) {
+            const auto rem = std::chrono::duration_cast<std::chrono::seconds>(
+                end_wait - std::chrono::steady_clock::now()).count();
+            std::cerr << "\rRemaining retention time: " << format_duration(static_cast<double>(rem)) << "    " << std::flush;
+            std::this_thread::sleep_for(std::chrono::milliseconds(250));
+        }
+        std::cerr << "\rRemaining retention time: 0.0s                      \n" << std::flush;
+
+        std::cout << "\n[Phase 2/2] Reading back and verifying PRBS32 + ECC...\n";
+        transport_->flush();
+        ProgressDisplay verify_prog("test.verify", length);
+        client_.nand_test(address, length, protocol::TestMode::verify_only, mark_bad, base_seed,
+                          [&verify_prog](std::uint64_t val) { verify_prog.update(val); },
+                          [&verify_prog](const BadBlockEvent &ev) { verify_prog.log_bad_block(ev); });
+        verify_prog.finish();
+
+        std::cout << "\nRetention test completed on " << target_desc << " (" << block_count << " blocks, "
+                  << verify_prog.bad_blocks() << " bad blocks marked)\n";
+        return;
+    }
+
+    for (unsigned pass = 1; pass <= passes; ++pass) {
+        const std::uint32_t pass_seed = base_seed ^ (static_cast<std::uint32_t>(pass - 1) * 0x9E3779B9U);
+        std::string mode_desc = (mode == protocol::TestMode::write_only) ? "test.write (write-only baseline)" :
+                                (mode == protocol::TestMode::verify_only) ? "test.verify (verify retention)" :
+                                (mode == protocol::TestMode::full_block) ? "test (per-block write-then-read)" :
+                                "test (SSD RDT full-disk spanning)";
+        std::string tag = (mode == protocol::TestMode::write_only) ? "test.write" :
+                          (mode == protocol::TestMode::verify_only) ? "test.verify" : "test";
+
+        if (passes > 1)
+            std::cout << "\n=== [Pass " << pass << "/" << passes << "] " << mode_desc << " | Seed: " << hex_number(pass_seed) << " ===\n";
+        else
+            std::cout << "Running " << mode_desc << " on " << target_desc << " [offset "
+                      << hex_number(address) << ", length " << hex_number(length)
+                      << " (" << format_data_size(length) << ", " << block_count << " blocks)] (Seed: "
+                      << hex_number(pass_seed) << ")...\n";
+
+        transport_->flush();
+        ProgressDisplay progress(tag, length);
+        client_.nand_test(address, length, mode, mark_bad, pass_seed,
+                          [&progress](std::uint64_t val) { progress.update(val); },
+                          [&progress](const BadBlockEvent &ev) { progress.log_bad_block(ev); });
+        progress.finish();
+
+        if (mode == protocol::TestMode::write_only) {
+            std::cout << "Test baseline pattern written successfully (seed: " << hex_number(pass_seed) << ").\n"
+                      << "You may power off or let the device sit. When ready to verify, run:\n"
+                      << "    test.verify --seed " << hex_number(pass_seed) << "\n";
+        } else if (progress.bad_blocks() > 0) {
+            std::cout << tag << " pass " << pass << " completed with " << progress.bad_blocks()
+                      << " damaged blocks marked bad\n";
+        } else {
+            std::cout << tag << (passes > 1 ? (" pass " + std::to_string(pass)) : "")
+                      << " completed successfully (100% healthy, 0 errors)\n";
+        }
+    }
 }
 
 void CommandShell::command_write(const std::vector<std::string> &arguments,
@@ -408,7 +814,7 @@ void CommandShell::command_write(const std::vector<std::string> &arguments,
     client_.write(input, address, length,
                   static_cast<std::uint32_t>(transfer_page_size), flags,
                   [&progress](std::uint64_t value) { progress.update(value); },
-                  print_bad_block);
+                  [&progress](const BadBlockEvent &event) { progress.log_bad_block(event); });
     progress.finish();
     std::cout << "Wrote " << length << " bytes from " << path.string() << '\n';
 }
@@ -514,7 +920,7 @@ void CommandShell::command_write_qpic(
         raw_address, raw_length, static_cast<std::uint32_t>(raw_page_size),
         flags,
         [&progress](std::uint64_t value) { progress.update(value); },
-        print_bad_block);
+        [&progress](const BadBlockEvent &event) { progress.log_bad_block(event); });
     progress.finish();
     std::cout << "Wrote " << input_size << " data bytes as QPIC "
               << (*ecc_mode == qpic::EccMode::bch4 ? "BCH4" : "BCH8")
@@ -523,13 +929,13 @@ void CommandShell::command_write_qpic(
 }
 
 void CommandShell::command_read_qpic(const std::vector<std::string> &arguments) {
-    if (arguments.size() < 3)
+    if (arguments.size() < 2)
         throw Error("Usage: read.qpic FILE <PARTITION|OFFSET> [LENGTH] [--ecc bch4|bch8]");
 
     std::optional<qpic::EccMode> ecc_mode;
     std::string file_arg;
     std::string target_arg;
-    std::optional<std::string> length_arg;
+    std::optional<std::uint64_t> explicit_length;
 
     for (std::size_t index = 1; index < arguments.size(); ++index) {
         if (arguments[index] == "--ecc") {
@@ -540,17 +946,17 @@ void CommandShell::command_read_qpic(const std::vector<std::string> &arguments) 
             else if (arguments[index] == "bch8")
                 ecc_mode = qpic::EccMode::bch8;
             else
-                throw Error("QPIC ECC must be bch4 or bch8");
-        } else if (arguments[index].rfind("--", 0) == 0) {
-            throw Error("Unknown read.qpic option: " + arguments[index]);
-        } else if (file_arg.empty()) {
+                throw Error("Unknown ECC mode: " + arguments[index]);
+            continue;
+        }
+        if (file_arg.empty()) {
             file_arg = arguments[index];
         } else if (target_arg.empty()) {
             target_arg = arguments[index];
-        } else if (!length_arg) {
-            length_arg = arguments[index];
+        } else if (!explicit_length) {
+            explicit_length = parse_number(arguments[index]);
         } else {
-            throw Error("Too many arguments for read.qpic command");
+            throw Error("Too many arguments for read.qpic");
         }
     }
 
@@ -558,36 +964,39 @@ void CommandShell::command_read_qpic(const std::vector<std::string> &arguments) 
         throw Error("Usage: read.qpic FILE <PARTITION|OFFSET> [LENGTH] [--ecc bch4|bch8]");
 
     ensure_probe();
+
     std::uint64_t data_address = 0;
     std::uint64_t length = 0;
     std::string target_desc;
 
-    const auto mibib = read_mibib_table();
-    const mibib::PartitionEntry *matched_part = nullptr;
-    if (mibib) {
-        matched_part = mibib->find(target_arg);
+    auto table = read_mibib_table(false);
+    bool found_partition = false;
+    if (table) {
+        for (const auto &part : table->partitions) {
+            if (part.name == target_arg) {
+                data_address = part.start_offset;
+                length = explicit_length ? *explicit_length : part.size_bytes;
+                target_desc = "partition '" + part.name + "'";
+                found_partition = true;
+                break;
+            }
+        }
     }
 
-    if (matched_part != nullptr) {
-        data_address = matched_part->start_offset;
-        length = length_arg ? parse_number(*length_arg) : matched_part->size_bytes;
-        target_desc = "partition '" + matched_part->name + "'";
-    } else {
+    if (!found_partition) {
         data_address = parse_number(target_arg);
-        if (data_address % chip_->page_size != 0)
-            throw Error("QPIC read address must be data-page aligned");
-        if (length_arg) {
-            length = parse_number(*length_arg);
-        } else {
-            length = chip_->total_size - data_address;
-        }
+        if (!explicit_length)
+            throw Error("Length is required when reading by raw offset");
+        length = *explicit_length;
         target_desc = "offset " + hex_number(data_address);
     }
 
+    if (data_address % chip_->page_size != 0)
+        throw Error("Read offset must be page aligned");
+    if (length == 0 || length % chip_->page_size != 0)
+        throw Error("Read length must be a non-zero multiple of page size");
     if (data_address >= chip_->total_size || length > chip_->total_size - data_address)
         throw Error("Read range is outside the chip");
-    if (length == 0)
-        throw Error("Read length must be greater than zero");
 
     if (!ecc_mode) {
         const std::size_t cws_per_page = chip_->page_size / 512;
@@ -605,7 +1014,7 @@ void CommandShell::command_read_qpic(const std::vector<std::string> &arguments) 
 
     const qpic::PageEncoder encoder(chip_->page_size, chip_->spare_size, *ecc_mode);
     const std::uint64_t raw_page_size = encoder.raw_page_size();
-    const std::uint64_t page_count = rounded_up(length, chip_->page_size) / chip_->page_size;
+    const std::uint64_t page_count = length / chip_->page_size;
     const std::uint64_t start_page = data_address / chip_->page_size;
     const std::uint64_t raw_address = checked_product(start_page, raw_page_size, "QPIC raw read address");
     const std::uint64_t raw_length = checked_product(page_count, raw_page_size, "QPIC raw read length");
@@ -643,7 +1052,7 @@ void CommandShell::command_read_qpic(const std::vector<std::string> &arguments) 
             }
         },
         nullptr,
-        print_bad_block);
+        [&progress](const BadBlockEvent &event) { progress.log_bad_block(event); });
     progress.finish();
 
     std::cout << "Read " << length << " bytes from " << target_desc
@@ -668,15 +1077,15 @@ void CommandShell::command_verify_qpic(const std::vector<std::string> &arguments
             else if (arguments[index] == "bch8")
                 ecc_mode = qpic::EccMode::bch8;
             else
-                throw Error("QPIC ECC must be bch4 or bch8");
-        } else if (arguments[index].rfind("--", 0) == 0) {
-            throw Error("Unknown verify.qpic option: " + arguments[index]);
-        } else if (file_arg.empty()) {
+                throw Error("Unknown ECC mode: " + arguments[index]);
+            continue;
+        }
+        if (file_arg.empty()) {
             file_arg = arguments[index];
         } else if (target_arg.empty()) {
             target_arg = arguments[index];
         } else {
-            throw Error("Too many arguments for verify.qpic command");
+            throw Error("Too many arguments for verify.qpic");
         }
     }
 
@@ -684,33 +1093,52 @@ void CommandShell::command_verify_qpic(const std::vector<std::string> &arguments
         throw Error("Usage: verify.qpic FILE [PARTITION|OFFSET] [--ecc bch4|bch8]");
 
     ensure_probe();
+
     const std::filesystem::path path = file_arg;
     const std::uint64_t input_size = input_file_size(path);
 
     std::uint64_t data_address = 0;
     std::string target_desc;
 
-    if (!target_arg.empty()) {
-        const auto mibib = read_mibib_table();
-        const mibib::PartitionEntry *matched_part = nullptr;
-        if (mibib) {
-            matched_part = mibib->find(target_arg);
+    if (target_arg.empty()) {
+        const std::string stem = path.stem().string();
+        auto table = read_mibib_table(false);
+        bool found_partition = false;
+        if (table) {
+            for (const auto &part : table->partitions) {
+                if (part.name == stem || part.name == ("0:" + stem)) {
+                    data_address = part.start_offset;
+                    target_desc = "partition '" + part.name + "'";
+                    found_partition = true;
+                    break;
+                }
+            }
         }
-
-        if (matched_part != nullptr) {
-            data_address = matched_part->start_offset;
-            target_desc = "partition '" + matched_part->name + "'";
-        } else {
-            data_address = parse_number(target_arg);
-            if (data_address % chip_->page_size != 0)
-                throw Error("QPIC verify address must be data-page aligned");
-            target_desc = "offset " + hex_number(data_address);
+        if (!found_partition) {
+            data_address = 0;
+            target_desc = "offset 0x0";
         }
     } else {
-        data_address = 0;
-        target_desc = "offset 0x0";
+        auto table = read_mibib_table(false);
+        bool found_partition = false;
+        if (table) {
+            for (const auto &part : table->partitions) {
+                if (part.name == target_arg) {
+                    data_address = part.start_offset;
+                    target_desc = "partition '" + part.name + "'";
+                    found_partition = true;
+                    break;
+                }
+            }
+        }
+        if (!found_partition) {
+            data_address = parse_number(target_arg);
+            target_desc = "offset " + hex_number(data_address);
+        }
     }
 
+    if (data_address % chip_->page_size != 0)
+        throw Error("Verify offset must be page aligned");
     if (data_address >= chip_->total_size || input_size > chip_->total_size - data_address)
         throw Error("Verify range is outside the chip");
 
@@ -729,9 +1157,9 @@ void CommandShell::command_verify_qpic(const std::vector<std::string> &arguments
     }
 
     const qpic::PageEncoder encoder(chip_->page_size, chip_->spare_size, *ecc_mode);
-    const std::uint64_t raw_page_size = encoder.raw_page_size();
     const std::uint64_t page_count = rounded_up(input_size, chip_->page_size) / chip_->page_size;
     const std::uint64_t start_page = data_address / chip_->page_size;
+    const std::uint64_t raw_page_size = encoder.raw_page_size();
     const std::uint64_t raw_address = checked_product(start_page, raw_page_size, "QPIC raw verify address");
     const std::uint64_t raw_length = checked_product(page_count, raw_page_size, "QPIC raw verify length");
 
@@ -765,9 +1193,12 @@ void CommandShell::command_verify_qpic(const std::vector<std::string> &arguments
                 const std::size_t to_compare = static_cast<std::size_t>(
                     std::min<std::uint64_t>(input_size - compared, user_data.size()));
                 if (to_compare > 0) {
-                    std::vector<std::uint8_t> wanted(to_compare, 0xff);
+                    std::vector<std::uint8_t> wanted(to_compare);
                     expected.read(reinterpret_cast<char *>(wanted.data()),
                                   static_cast<std::streamsize>(to_compare));
+                    if (expected.bad() || expected.gcount() != static_cast<std::streamsize>(to_compare))
+                        throw Error("Failed while reading verify file");
+
                     if (!mismatch) {
                         for (std::size_t i = 0; i < to_compare; ++i) {
                             if (wanted[i] != user_data[i]) {
@@ -782,7 +1213,7 @@ void CommandShell::command_verify_qpic(const std::vector<std::string> &arguments
             }
         },
         nullptr,
-        print_bad_block);
+        [&progress](const BadBlockEvent &event) { progress.log_bad_block(event); });
     progress.finish();
 
     if (mismatch) {
@@ -1038,7 +1469,7 @@ void CommandShell::command_flash(const std::vector<std::string> &arguments) {
     client_.erase(
         target_address, erase_length, erase_flags,
         [&erase_progress](std::uint64_t value) { erase_progress.update(value); },
-        print_bad_block);
+        [&erase_progress](const BadBlockEvent &event) { erase_progress.log_bad_block(event); });
     erase_progress.finish();
 
     // Step 2: Write via QPIC
@@ -1085,7 +1516,7 @@ void CommandShell::command_flash(const std::vector<std::string> &arguments) {
         raw_address, raw_length, static_cast<std::uint32_t>(raw_page_size),
         write_flags,
         [&flash_progress](std::uint64_t value) { flash_progress.update(value); },
-        print_bad_block);
+        [&flash_progress](const BadBlockEvent &event) { flash_progress.log_bad_block(event); });
     flash_progress.finish();
 
     std::cout << "Flashed " << input_size << " bytes successfully to " << dest_desc << '\n';
@@ -1170,7 +1601,7 @@ void CommandShell::command_verify(const std::vector<std::string> &arguments) {
             compared += size;
         },
         [&progress](std::uint64_t value) { progress.update(value); },
-        print_bad_block);
+        [&progress](const BadBlockEvent &event) { progress.log_bad_block(event); });
     progress.finish();
 
     if (mismatch) {
@@ -1196,6 +1627,10 @@ void CommandShell::print_help() {
         << "  read.raw FILE [START-PAGE] [PAGE-COUNT]   read data+OOB verbatim\n"
         << "  erase all                                 erase the complete NAND immediately\n"
         << "  erase OFFSET LENGTH                       erase a block-aligned range immediately\n"
+        << "  scrub [all | OFFSET LENGTH]               force unconditioned physical erase (wipes OOB markers)\n"
+        << "  test [all | PART|OFF LEN] [--mode b|c]    hardware self-test (mode: block=per-block, chip=RDT full-span)\n"
+        << "  test.write [all | PART|OFF LEN] [--seed S]write PRBS32 baseline for delayed retention test\n"
+        << "  test.verify [all | PART|OFF LEN] [--seed] verify PRBS32 retention and mark leaking bad blocks\n"
         << "  write FILE [OFFSET]                       write data, pad tail with FF\n"
         << "  write.raw FILE [START-PAGE]               write data+OOB verbatim\n"
         << "  verify FILE [OFFSET] [--raw]              stream-compare NAND to file\n"
