@@ -34,6 +34,15 @@ Available operations:
   database, and configure the programmer. Supplying a name forces a database
   entry for otherwise unknown IDs.
 - `info`: show the active ID and database geometry.
+- `smem [--refresh]`: scan the first 4MB of NAND at 64KB block boundaries to discover
+  and print the Qualcomm SMEM / MIBIB partition table (partition names, start blocks,
+  block counts, offsets, and sizes).
+- `flash FILE <PARTITION|OFFSET> [--ecc bch4|bch8]`: erase the target partition or
+  offset range and flash the input file in Qualcomm QPIC layout in one step.
+  If a partition name is supplied (e.g. `0:APPSBL` or `APPSBL`), the offset and
+  partition size are automatically resolved from the SMEM partition table and checked
+  against the file size. If `--ecc` is omitted, the BCH algorithm (BCH4 vs BCH8)
+  is auto-detected based on page and OOB size.
 - `read FILE [OFFSET] [LENGTH]`: read data bytes. Offset and length must be
   data-page aligned.
 - `read.raw FILE [START-PAGE] [PAGE-COUNT]`: read physical `data+OOB` pages
@@ -42,15 +51,23 @@ Available operations:
   There is no confirmation prompt or `--yes` option.
 - `write FILE [OFFSET]`: write data pages, padding the final page with `0xff`.
 - `write.raw FILE [START-PAGE]`: write complete `data+OOB` pages verbatim.
-- `write.qpic FILE [NAND-OFFSET] --ecc bch4|bch8`: generate a Qualcomm QPIC
-  x8 page/OOB layout on the PC and write it as raw pages. `NAND-OFFSET` is a
-  data-space byte offset, defaults to zero, and must be data-page aligned.
+- `write.qpic FILE [NAND-OFFSET] [--ecc bch4|bch8]`: generate a Qualcomm QPIC
+  x8 page/OOB layout on the PC and write it as raw pages. If `--ecc` is omitted,
+  the ECC mode is auto-detected from the chip geometry (BCH8 if `oob_size >= (page_size / 512) * 20`,
+  otherwise BCH4). `NAND-OFFSET` is a data-space byte offset, defaults to zero,
+  and must be data-page aligned.
+- `read.qpic FILE <PARTITION|OFFSET> [LENGTH] [--ecc bch4|bch8]`: read physical raw pages
+  from the specified partition name or byte offset and automatically de-interleave the
+  QPIC Codewords, saving a clean flat binary file.
+- `verify.qpic FILE [PARTITION|OFFSET] [--ecc bch4|bch8]`: stream-read raw NAND pages,
+  de-interleave QPIC Codewords in real time, and compare against a flat image file.
+- `debug [on|off]`: toggle verbose transport and protocol trace logging in REPL.
 - `verify FILE [OFFSET] [--raw]`: stream-compare NAND content against a file.
 
 Numbers accept decimal, `0x` hexadecimal, and `K`, `M`, or `G` binary suffixes.
 
-None of `write`, `write.raw`, or `write.qpic` erases NAND automatically. Run an
-explicit block-aligned `erase` first when the target is not already erased.
+Standard `write`, `write.raw`, and `write.qpic` do not erase NAND automatically.
+Use the `flash` command or an explicit `erase` before writing.
 
 ## Raw image contract
 
@@ -68,10 +85,19 @@ protocol.
 ## QPIC image contract
 
 `write.qpic` implements the standard x8 BCH4/BCH8 page layout used by
-[qcom-nandc-pagify](https://github.com/ecsv/qcom-nandc-pagify). It uses
+Qualcomm QPIC NAND controllers (e.g. IPQ807x / IPQ60xx / IPQ50xx such as Xiaomi AX5)
+and [qcom-nandc-pagify](https://github.com/ecsv/qcom-nandc-pagify). It uses
 516-byte codeword data, a one-byte `0xff` bad-block marker, 7-byte BCH4 or
 13-byte BCH8 parity, and the corresponding `0xff` codeword/OOB padding. A
 partial final input page is padded with `0x00`, matching the reference tool.
+
+The ECC algorithm (`bch4` vs `bch8`) is automatically determined from the active
+NAND chip's `page_size` and `spare_size` (OOB) using the Qualcomm QPIC standard formula:
+- Codewords per page = `page_size / 512`
+- Required minimum OOB for 8-bit ECC = `(page_size / 512) * 20`
+- If `oob_size >= min_oob_for_bch8`, **BCH8** is chosen (e.g., 2KB page with 128B OOB, 4KB page with 224B/256B OOB).
+- Otherwise, **BCH4** is chosen (e.g., 2KB page with 64B OOB like standard 128MB SLC NAND on AX5).
+- You can still explicitly force an algorithm using `--ecc bch4` or `--ecc bch8`.
 
 The generated data+OOB page is streamed through the existing raw write
 protocol with STM32 hardware ECC disabled. Bad blocks are skipped. The current

@@ -1,5 +1,6 @@
 #include "nandprog/chip_db.hpp"
 #include "nandprog/error.hpp"
+#include "nandprog/mibib.hpp"
 #include "nandprog/nand_client.hpp"
 #include "nandprog/protocol.hpp"
 #include "nandprog/qpic.hpp"
@@ -8,6 +9,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstring>
 #include <filesystem>
 #include <iostream>
 #include <sstream>
@@ -48,7 +50,6 @@ public:
         responses.insert(responses.end(), {1, 3});
         for (unsigned shift = 0; shift < 64; shift += 8)
             responses.push_back(static_cast<std::uint8_t>(bytes >> shift));
-        responses.insert(responses.end(), 4, 0);
     }
 
     bool open_ = true;
@@ -399,6 +400,75 @@ void test_command_line_parser() {
             "number suffix parsing");
 }
 
+void test_mibib_parser() {
+    std::vector<std::uint8_t> buffer(512, 0);
+    // MIBIB header
+    *reinterpret_cast<std::uint32_t *>(&buffer[0]) = 0xFE569FAC;
+    *reinterpret_cast<std::uint32_t *>(&buffer[4]) = 0xCD7F127A;
+    *reinterpret_cast<std::uint32_t *>(&buffer[8]) = 4; // version 4
+
+    // System Table header at offset 16
+    *reinterpret_cast<std::uint32_t *>(&buffer[16]) = 0x55EE73AA;
+    *reinterpret_cast<std::uint32_t *>(&buffer[20]) = 0xE35EBDDB;
+    *reinterpret_cast<std::uint32_t *>(&buffer[24]) = 4; // table version 4
+    *reinterpret_cast<std::uint32_t *>(&buffer[28]) = 2; // 2 partitions
+
+    // Entry 0: "0:SBL1", start_block = 0, size_blocks = 4
+    std::memcpy(&buffer[32], "0:SBL1", 6);
+    *reinterpret_cast<std::uint32_t *>(&buffer[48]) = 0;
+    *reinterpret_cast<std::uint32_t *>(&buffer[52]) = 4;
+
+    // Entry 1: "0:APPSBL", start_block = 32, size_blocks = 16
+    std::memcpy(&buffer[60], "0:APPSBL", 8);
+    *reinterpret_cast<std::uint32_t *>(&buffer[76]) = 32;
+    *reinterpret_cast<std::uint32_t *>(&buffer[80]) = 16;
+
+    constexpr std::uint32_t block_size = 128 * 1024;
+    constexpr std::uint64_t total_size = 128 * 1024 * 1024;
+    const auto table = nandprog::mibib::parse_mibib(buffer.data(), buffer.size(), block_size, total_size, 0x20000);
+    require(table.has_value(), "MIBIB table parse");
+    require(table->partitions.size() == 2, "MIBIB partition count");
+    require(table->partitions[0].name == "0:SBL1", "Partition 0 name");
+    require(table->partitions[0].start_offset == 0, "Partition 0 start offset");
+    require(table->partitions[0].size_bytes == 4 * block_size, "Partition 0 size");
+
+    require(table->partitions[1].name == "0:APPSBL", "Partition 1 name");
+    require(table->partitions[1].start_offset == 32 * block_size, "Partition 1 start offset");
+    require(table->partitions[1].size_bytes == 16 * block_size, "Partition 1 size");
+
+    // Test find with various formats
+    require(table->find("0:APPSBL") != nullptr, "Find exact");
+    require(table->find("appsbl") != nullptr, "Find case-insensitive without 0:");
+    require(table->find("0:appsbl") != nullptr, "Find case-insensitive with 0:");
+    require(table->find("NONEXISTENT") == nullptr, "Find non-existent");
+}
+
+void test_qpic_deinterleave_roundtrip() {
+    // 2KB + 64B BCH4
+    const nandprog::qpic::PageEncoder encoder_bch4(2048, 64, nandprog::qpic::EccMode::bch4);
+    std::vector<std::uint8_t> original_data(2048);
+    for (std::size_t i = 0; i < 2048; ++i) {
+        original_data[i] = static_cast<std::uint8_t>((i * 7 + 13) & 0xff);
+    }
+    const auto encoded_bch4 = encoder_bch4.encode(original_data.data(), original_data.size());
+    require(encoded_bch4.size() == 2112, "BCH4 encoded raw page size");
+
+    const auto deinterleaved_bch4 = nandprog::mibib::deinterleave_qpic(
+        encoded_bch4.data(), encoded_bch4.size(), 2048, 64);
+    require(deinterleaved_bch4.size() == 2048, "BCH4 deinterleaved size");
+    require(deinterleaved_bch4 == original_data, "BCH4 deinterleave roundtrip identity");
+
+    // 2KB + 128B BCH8
+    const nandprog::qpic::PageEncoder encoder_bch8(2048, 128, nandprog::qpic::EccMode::bch8);
+    const auto encoded_bch8 = encoder_bch8.encode(original_data.data(), original_data.size());
+    require(encoded_bch8.size() == 2176, "BCH8 encoded raw page size");
+
+    const auto deinterleaved_bch8 = nandprog::mibib::deinterleave_qpic(
+        encoded_bch8.data(), encoded_bch8.size(), 2048, 128);
+    require(deinterleaved_bch8.size() == 2048, "BCH8 deinterleaved size");
+    require(deinterleaved_bch8 == original_data, "BCH8 deinterleave roundtrip identity");
+}
+
 } // namespace
 
 int main() {
@@ -414,6 +484,8 @@ int main() {
         test_nand_operations_do_not_flush_transport();
         test_normal_write_padding();
         test_command_line_parser();
+        test_mibib_parser();
+        test_qpic_deinterleave_roundtrip();
         std::cout << "All nandprog tests passed\n";
         return 0;
     } catch (const std::exception &error) {

@@ -10,6 +10,7 @@ option(NANDPROG_BUILD_TESTS "Build nandprog tests" ON)
 
 add_library(nandprog_core
     src/core/chip_db.cpp
+    src/core/mibib.cpp
     src/core/nand_client.cpp
     src/core/protocol.cpp
     src/core/util.cpp

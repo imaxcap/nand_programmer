@@ -1,6 +1,7 @@
 #include "nandprog/transport.hpp"
 
 #include "nandprog/error.hpp"
+#include "nandprog/util.hpp"
 
 #include <cerrno>
 #include <chrono>
@@ -20,6 +21,7 @@ public:
     void open(const std::string &device, std::uint32_t baud_rate) override {
         if (fd_ >= 0)
             throw Error("Serial port is already open");
+        log_debug("PosixSerialTransport: opening " + device + " at baud " + std::to_string(baud_rate));
         fd_ = ::open(device.c_str(), O_RDWR | O_NOCTTY | O_CLOEXEC);
         if (fd_ < 0)
             throw Error("Failed to open " + device + ": " + std::strerror(errno));
@@ -29,6 +31,7 @@ public:
             if (tcflush(fd_, TCIOFLUSH) != 0)
                 throw Error("Failed to flush " + device + ": " +
                             std::strerror(errno));
+            log_debug("PosixSerialTransport: opened successfully");
         } catch (...) {
             close();
             throw;
@@ -37,6 +40,7 @@ public:
 
     void close() noexcept override {
         if (fd_ >= 0) {
+            log_debug("PosixSerialTransport: closing port fd " + std::to_string(fd_));
             ::close(fd_);
             fd_ = -1;
         }
@@ -48,6 +52,7 @@ public:
                       unsigned timeout_ms) override {
         if (size == 0 || size > 64)
             throw Error("Serial protocol packet must contain 1..64 bytes");
+        log_debug("POSIX TX (" + std::to_string(size) + "B): " + hex_dump(data, size));
         wait(POLLOUT, timeout_ms);
         const ssize_t written = ::write(fd_, data, size);
         if (written < 0)
@@ -59,12 +64,17 @@ public:
     void read_exact(std::uint8_t *data, std::size_t size,
                     unsigned timeout_ms) override {
         using Clock = std::chrono::steady_clock;
-        const auto deadline = Clock::now() + std::chrono::milliseconds(timeout_ms);
+        const auto start_time = Clock::now();
+        const auto deadline = start_time + std::chrono::milliseconds(timeout_ms);
+        log_debug("POSIX RX waiting for " + std::to_string(size) + "B (timeout=" + std::to_string(timeout_ms) + "ms)...");
         std::size_t offset = 0;
         while (offset < size) {
             const auto now = Clock::now();
-            if (now >= deadline)
+            if (now >= deadline) {
+                const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - start_time).count();
+                log_debug("POSIX RX TIMEOUT after " + std::to_string(elapsed) + "ms, received " + std::to_string(offset) + "/" + std::to_string(size) + "B");
                 throw Error("Serial read timed out");
+            }
             const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
                 deadline - now);
             wait(POLLIN, static_cast<unsigned>(remaining.count() + 1));
@@ -77,7 +87,15 @@ public:
             }
             if (count == 0)
                 continue;
+            log_debug("POSIX RX got " + std::to_string(count) + "B: " + hex_dump(data + offset, count));
             offset += static_cast<std::size_t>(count);
+        }
+    }
+
+    void flush() override {
+        if (fd_ >= 0) {
+            log_debug("PosixSerialTransport: flushing RX/TX buffers");
+            ::tcflush(fd_, TCIOFLUSH);
         }
     }
 

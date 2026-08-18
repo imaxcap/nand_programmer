@@ -1,6 +1,7 @@
 #pragma once
 
 #include "nandprog/chip_db.hpp"
+#include "nandprog/mibib.hpp"
 #include "nandprog/nand_client.hpp"
 #include "nandprog/transport.hpp"
 
@@ -34,9 +35,11 @@ private:
     protocol::FirmwareVersion firmware_version_{};
     protocol::ChipId chip_id_{};
     bool probed_ = false;
+    std::optional<mibib::PartitionTable> cached_mibib_;
 
     void ensure_open();
     void ensure_probe();
+    std::optional<mibib::PartitionTable> read_mibib_table(bool force_refresh = false);
     void command_id(const std::vector<std::string> &arguments);
     void command_probe(const std::vector<std::string> &arguments);
     void command_info() const;
@@ -44,6 +47,10 @@ private:
     void command_erase(const std::vector<std::string> &arguments);
     void command_write(const std::vector<std::string> &arguments, bool raw);
     void command_write_qpic(const std::vector<std::string> &arguments);
+    void command_read_qpic(const std::vector<std::string> &arguments);
+    void command_verify_qpic(const std::vector<std::string> &arguments);
+    void command_flash(const std::vector<std::string> &arguments);
+    void command_part(const std::vector<std::string> &arguments);
     void command_verify(const std::vector<std::string> &arguments);
 };
 

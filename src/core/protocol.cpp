@@ -1,6 +1,7 @@
 #include "nandprog/protocol.hpp"
 
 #include "nandprog/error.hpp"
+#include "nandprog/util.hpp"
 
 #include <sstream>
 
@@ -23,9 +24,9 @@ std::size_t status_payload_size(std::uint8_t info) {
         return 0;
     case Status::error:
     case Status::bad_block:
-    case Status::write_ack:
     case Status::bad_block_skip:
         return 12;
+    case Status::write_ack:
     case Status::progress:
         return 8;
     }
@@ -105,6 +106,9 @@ Response read_response(Transport &transport, unsigned timeout_ms) {
     response.payload.resize(payload_size);
     if (payload_size != 0)
         transport.read_exact(response.payload.data(), payload_size, timeout_ms);
+    log_debug("protocol::read_response: code=" + std::to_string(static_cast<int>(response.code)) +
+              " info=" + std::to_string(static_cast<int>(response.info)) +
+              " payload=" + hex_dump(response.payload.data(), response.payload.size()));
     return response;
 }
 

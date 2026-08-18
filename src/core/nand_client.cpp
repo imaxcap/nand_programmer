@@ -5,8 +5,10 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstring>
 #include <sstream>
+#include <thread>
 #include <vector>
 
 namespace nandprog {
@@ -14,7 +16,8 @@ namespace {
 
 constexpr unsigned control_timeout_ms = 5000;
 constexpr unsigned operation_timeout_ms = 30000;
-constexpr unsigned write_operation_timeout_ms = 5000U * 1000U;
+constexpr unsigned write_start_timeout_ms = 10000;
+constexpr unsigned write_ack_timeout_ms = 10000;
 
 protocol::Status response_status(const protocol::Response &response) {
     if (response.code != protocol::ResponseCode::status)
@@ -203,7 +206,7 @@ void NandClient::write_pages(const PageProvider &provide_page,
                                flags),
         control_timeout_ms);
     try {
-        expect_ok(write_operation_timeout_ms, on_bad_block);
+        expect_ok(write_start_timeout_ms, on_bad_block);
     } catch (const Error &error) {
         throw Error(std::string("Timed out or failed while waiting for write_start OK: ") +
                     error.what());
@@ -213,11 +216,16 @@ void NandClient::write_pages(const PageProvider &provide_page,
     std::uint64_t transferred = 0;
     while (transferred < length) {
         provide_page(page.data(), page.size());
+        log_debug("write_pages: sending page at offset=" + hex_number(address + transferred) +
+                  " (bytes=" + std::to_string(transferred) + "/" + std::to_string(length) + ")");
 
         std::size_t page_offset = 0;
+        unsigned chunk_index = 0;
         while (page_offset < page.size()) {
             const std::size_t chunk_size = std::min(
                 protocol::max_write_payload, page.size() - page_offset);
+            log_debug("write_pages: chunk #" + std::to_string(chunk_index++) +
+                      " offset=" + std::to_string(page_offset) + " size=" + std::to_string(chunk_size));
             transport_.write_packet(
                 protocol::encode_write_data(page.data() + page_offset,
                                             chunk_size),
@@ -226,10 +234,12 @@ void NandClient::write_pages(const PageProvider &provide_page,
         }
 
         const std::uint64_t expected_ack = transferred + page.size();
+        log_debug("write_pages: page upload finished, waiting for write_ack (expected=" +
+                  std::to_string(expected_ack) + ", timeout=" + std::to_string(write_ack_timeout_ms) + "ms)...");
         while (true) {
             protocol::Response response;
             try {
-                response = protocol::read_response(transport_, write_operation_timeout_ms);
+                response = protocol::read_response(transport_, write_ack_timeout_ms);
             } catch (const Error &error) {
                 throw Error(std::string("Timed out or failed while waiting for write_ack at bytes=") +
                             std::to_string(transferred) + "/" +
@@ -237,7 +247,7 @@ void NandClient::write_pages(const PageProvider &provide_page,
             }
             switch (response_status(response)) {
             case protocol::Status::write_ack:
-                if (response.payload.size() != 12 ||
+                if (response.payload.size() < 8 ||
                     protocol::decode_u64(response.payload.data()) != expected_ack)
                     throw Error("Firmware returned an invalid write acknowledgement");
                 transferred = expected_ack;
@@ -247,16 +257,20 @@ void NandClient::write_pages(const PageProvider &provide_page,
                     on_progress(transferred);
                 break;
             case protocol::Status::error:
+                log_debug("write_pages: received error response from firmware");
                 throw_firmware_error(response);
             case protocol::Status::bad_block:
+                log_debug("write_pages: received bad_block notification before ack");
                 if (on_bad_block)
                     on_bad_block(decode_bad_block(response, false));
                 continue;
             case protocol::Status::bad_block_skip:
+                log_debug("write_pages: received bad_block_skip notification before ack");
                 if (on_bad_block)
                     on_bad_block(decode_bad_block(response, true));
                 continue;
             default:
+                log_debug("write_pages: received unexpected status " + std::to_string(static_cast<int>(response_status(response))));
                 throw Error("Unexpected status during NAND write");
             }
             break;
@@ -268,7 +282,7 @@ void NandClient::write_pages(const PageProvider &provide_page,
     transport_.write_packet(protocol::encode_simple(protocol::Command::write_end),
                             control_timeout_ms);
     try {
-        expect_ok(write_operation_timeout_ms, on_bad_block);
+        expect_ok(control_timeout_ms, on_bad_block);
     } catch (const Error &error) {
         throw Error(std::string("Timed out or failed while waiting for write_end OK: ") +
                     error.what());
