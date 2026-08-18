@@ -67,7 +67,7 @@ void EP1_IN_Callback (void)
 * Return         : None.
 *******************************************************************************/
 #define PACKET_SIZE 64
-#define CIRC_BUF_SIZE 34 /* 62 * 34 = ~2K of data (max. NAND page) */
+#define CIRC_BUF_SIZE 136 /* 62 * 136 = ~8K of data (4 full NAND pages quad-buffer pipeline) */
 
 typedef uint8_t packet_buf_t[PACKET_SIZE];
 

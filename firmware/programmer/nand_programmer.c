@@ -20,7 +20,7 @@
 #include <inttypes.h>
 
 #define NP_PACKET_BUF_SIZE 64
-#define NP_MAX_PAGE_SIZE 0x21C0 /* 8KB + 448 spare */
+#define NP_MAX_PAGE_SIZE 0x1100 /* 4KB + 256 spare (4352 bytes) */
 #define NP_WRITE_ACK_BYTES 1984
 #define NP_NAND_TIMEOUT 0x1000000
 
@@ -780,8 +780,19 @@ static void nand_re_mark_bad_block(np_prog_t *prog, uint32_t block_page)
     nand_bad_block_table_add(block_page);
 }
 
-static uint8_t test_read_buf[NP_MAX_PAGE_SIZE];
-static uint8_t test_write_buf[NP_MAX_PAGE_SIZE];
+static inline bool nand_verify_prbs_page(uint32_t page_num, uint32_t seed, const uint8_t *buf, uint32_t len)
+{
+    uint32_t state = seed ^ (page_num * 0x1f1f1f1fU + 0xa5a55a5aU);
+    const uint32_t *p = (const uint32_t *)buf;
+    uint32_t words = len / 4;
+    for (uint32_t i = 0; i < words; i++)
+    {
+        state = state * 1664525U + 1013904223U;
+        if (p[i] != state)
+            return false;
+    }
+    return true;
+}
 
 static void nand_test_prepare_page(np_prog_t *prog, uint32_t page_num, uint32_t seed, uint8_t *out_raw, uint32_t data_page_size, uint32_t spare_size, qpic_ecc_mode_t qpic_ecc)
 {
@@ -799,19 +810,17 @@ static void nand_test_prepare_page(np_prog_t *prog, uint32_t page_num, uint32_t 
 
 static bool nand_test_verify_page(np_prog_t *prog, uint32_t page_num, uint32_t seed, const uint8_t *read_raw, uint32_t data_page_size, uint32_t spare_size, qpic_ecc_mode_t qpic_ecc)
 {
-    nand_generate_prbs_page(page_num, seed, prog->page.buf, data_page_size);
     if (qpic_ecc != QPIC_ECC_NONE)
     {
-        qpic_interleave_page(prog->page.buf, qpic_raw_buf, data_page_size, spare_size, qpic_ecc);
-        return (memcmp(qpic_raw_buf, read_raw, data_page_size + spare_size) == 0);
+        if (qpic_deinterleave_page(read_raw, prog->page.buf, data_page_size, spare_size, qpic_ecc) != 0)
+            return false;
+        return nand_verify_prbs_page(page_num, seed, prog->page.buf, data_page_size);
     }
     else
     {
-        if (memcmp(prog->page.buf, read_raw, data_page_size) != 0)
-            return false;
         if (nand_verify_ecc_for_page(read_raw, data_page_size, read_raw + data_page_size, spare_size) != 0)
             return false;
-        return true;
+        return nand_verify_prbs_page(page_num, seed, read_raw, data_page_size);
     }
 }
 
@@ -888,9 +897,9 @@ static int _np_cmd_nand_test(np_prog_t *prog)
                 for (uint32_t p = 0; p < pages_in_block; p++)
                 {
                     uint32_t page_num = block_start_page + p;
-                    nand_test_prepare_page(prog, page_num, seed, test_write_buf, data_page_size, spare_size, qpic_ecc);
+                    nand_test_prepare_page(prog, page_num, seed, qpic_raw_buf, data_page_size, spare_size, qpic_ecc);
 
-                    hal[prog->hal]->write_page_async(test_write_buf, page_num, raw_page_size);
+                    hal[prog->hal]->write_page_async(qpic_raw_buf, page_num, raw_page_size);
                     prog->nand_wr_in_progress = 1;
                     while (prog->nand_wr_in_progress)
                     {
@@ -930,9 +939,9 @@ static int _np_cmd_nand_test(np_prog_t *prog)
             for (uint32_t p = 0; p < pages_in_block; p++)
             {
                 uint32_t page_num = block_start_page + p;
-                hal[prog->hal]->read_page(test_read_buf, page_num, raw_page_size);
+                hal[prog->hal]->read_page(qpic_raw_buf, page_num, raw_page_size);
 
-                if (!nand_test_verify_page(prog, page_num, seed, test_read_buf, data_page_size, spare_size, qpic_ecc))
+                if (!nand_test_verify_page(prog, page_num, seed, qpic_raw_buf, data_page_size, spare_size, qpic_ecc))
                 {
                     block_bad = true;
                     break;
@@ -984,9 +993,9 @@ static int _np_cmd_nand_test(np_prog_t *prog)
                 for (uint32_t p = 0; p < pages_in_block; p++)
                 {
                     uint32_t cur_page = block_start_page + p;
-                    nand_test_prepare_page(prog, cur_page, seed, test_write_buf, data_page_size, spare_size, qpic_ecc);
+                    nand_test_prepare_page(prog, cur_page, seed, qpic_raw_buf, data_page_size, spare_size, qpic_ecc);
 
-                    hal[prog->hal]->write_page_async(test_write_buf, cur_page, raw_page_size);
+                    hal[prog->hal]->write_page_async(qpic_raw_buf, cur_page, raw_page_size);
                     prog->nand_wr_in_progress = 1;
                     while (prog->nand_wr_in_progress)
                     {
@@ -1013,9 +1022,9 @@ static int _np_cmd_nand_test(np_prog_t *prog)
                 for (uint32_t p = 0; p < pages_in_block; p++)
                 {
                     uint32_t cur_page = block_start_page + p;
-                    hal[prog->hal]->read_page(test_read_buf, cur_page, raw_page_size);
+                    hal[prog->hal]->read_page(qpic_raw_buf, cur_page, raw_page_size);
 
-                    if (!nand_test_verify_page(prog, cur_page, seed, test_read_buf, data_page_size, spare_size, qpic_ecc))
+                    if (!nand_test_verify_page(prog, cur_page, seed, qpic_raw_buf, data_page_size, spare_size, qpic_ecc))
                     {
                         block_bad = true;
                         break;
@@ -2012,12 +2021,15 @@ static inline bool check_mibib_magic(const uint8_t *buf, uint32_t len)
     if (len < 32)
         return false;
     uint32_t i;
-    for (i = 0; i + 16 <= len && i <= 64; i += 4)
+    for (i = 0; i + 16 <= len; i += 4)
     {
         uint32_t m1 = *(const uint32_t *)(buf + i);
-        if (m1 == 0xFE569FAC) // MIBIB Header
+        uint32_t m2 = *(const uint32_t *)(buf + i + 4);
+        if (m1 == 0xFE569FAC && m2 == 0xCD7F127A) // MIBIB Header
             return true;
-        if (m1 == 0x55EE73AA || m1 == 0xAA7D1B9A) // SYS / USR Table Header
+        if (m1 == 0x55EE73AA && m2 == 0xE35EBDDB) // SYS Table Header
+            return true;
+        if (m1 == 0xAA7D1B9A && m2 == 0x1F7D48BC) // USR Table Header
             return true;
     }
     return false;
@@ -2031,11 +2043,14 @@ static int np_cmd_nand_scan_mibib(np_prog_t *prog)
     uint32_t page_size = prog->chip_info.page_size;
     uint32_t spare_size = prog->chip_info.spare_size;
     uint32_t raw_page_size = page_size + spare_size;
-    if (page_size == 0 || raw_page_size > NP_MAX_PAGE_SIZE)
+    if (page_size == 0 || raw_page_size > NP_MAX_PAGE_SIZE || prog->chip_info.block_size == 0)
         return NP_ERR_INTERNAL;
 
     uint32_t pages_per_block = prog->chip_info.block_size / page_size;
-    uint32_t max_blocks_to_scan = 8;
+    uint64_t mibib_search_limit = 4ULL * 1024 * 1024; // 4MB search window
+    uint32_t max_blocks_to_scan = (uint32_t)((mibib_search_limit + prog->chip_info.block_size - 1) / prog->chip_info.block_size);
+    if (max_blocks_to_scan < 8)
+        max_blocks_to_scan = 8;
     uint32_t total_blocks = (uint32_t)(prog->chip_info.total_size / prog->chip_info.block_size);
     if (max_blocks_to_scan > total_blocks)
         max_blocks_to_scan = total_blocks;
@@ -2046,49 +2061,54 @@ static int np_cmd_nand_scan_mibib(np_prog_t *prog)
         if (prog->bb_is_read && nand_bad_block_table_lookup(start_page))
             continue;
 
-        uint32_t status = hal[prog->hal]->read_page(qpic_raw_buf, start_page, raw_page_size);
-        if (status != FLASH_STATUS_READY)
-            continue;
-
-        // 1. Check raw buffer
-        if (check_mibib_magic(qpic_raw_buf, raw_page_size))
+        uint32_t pages_to_check = (pages_per_block > 1) ? 2 : 1;
+        for (uint32_t p = 0; p < pages_to_check; p++)
         {
-            np_resp_scan_mibib_t resp;
-            resp.header.code = NP_RESP_DATA;
-            resp.header.info = sizeof(resp) - sizeof(resp.header);
-            resp.mibib_offset = (uint64_t)block * prog->chip_info.block_size;
-            resp.qpic_mode = 0;
-            memset(resp.reserved, 0, sizeof(resp.reserved));
-            return np_comm_cb->send((uint8_t *)&resp, sizeof(resp));
-        }
+            uint32_t target_page = start_page + p;
+            uint32_t status = hal[prog->hal]->read_page(qpic_raw_buf, target_page, raw_page_size);
+            if (status != FLASH_STATUS_READY)
+                continue;
 
-        // 2. Try QPIC BCH4 deinterleave
-        if (qpic_deinterleave_page(qpic_raw_buf, prog->page.buf, page_size, spare_size, QPIC_ECC_BCH4) == 0)
-        {
-            if (check_mibib_magic(prog->page.buf, page_size))
+            // 1. Check raw buffer
+            if (check_mibib_magic(qpic_raw_buf, raw_page_size))
             {
                 np_resp_scan_mibib_t resp;
                 resp.header.code = NP_RESP_DATA;
                 resp.header.info = sizeof(resp) - sizeof(resp.header);
                 resp.mibib_offset = (uint64_t)block * prog->chip_info.block_size;
-                resp.qpic_mode = 4;
+                resp.qpic_mode = 0;
                 memset(resp.reserved, 0, sizeof(resp.reserved));
                 return np_comm_cb->send((uint8_t *)&resp, sizeof(resp));
             }
-        }
 
-        // 3. Try QPIC BCH8 deinterleave
-        if (qpic_deinterleave_page(qpic_raw_buf, prog->page.buf, page_size, spare_size, QPIC_ECC_BCH8) == 0)
-        {
-            if (check_mibib_magic(prog->page.buf, page_size))
+            // 2. Try QPIC BCH4 deinterleave
+            if (qpic_deinterleave_page(qpic_raw_buf, prog->page.buf, page_size, spare_size, QPIC_ECC_BCH4) == 0)
             {
-                np_resp_scan_mibib_t resp;
-                resp.header.code = NP_RESP_DATA;
-                resp.header.info = sizeof(resp) - sizeof(resp.header);
-                resp.mibib_offset = (uint64_t)block * prog->chip_info.block_size;
-                resp.qpic_mode = 8;
-                memset(resp.reserved, 0, sizeof(resp.reserved));
-                return np_comm_cb->send((uint8_t *)&resp, sizeof(resp));
+                if (check_mibib_magic(prog->page.buf, page_size))
+                {
+                    np_resp_scan_mibib_t resp;
+                    resp.header.code = NP_RESP_DATA;
+                    resp.header.info = sizeof(resp) - sizeof(resp.header);
+                    resp.mibib_offset = (uint64_t)block * prog->chip_info.block_size;
+                    resp.qpic_mode = 4;
+                    memset(resp.reserved, 0, sizeof(resp.reserved));
+                    return np_comm_cb->send((uint8_t *)&resp, sizeof(resp));
+                }
+            }
+
+            // 3. Try QPIC BCH8 deinterleave
+            if (qpic_deinterleave_page(qpic_raw_buf, prog->page.buf, page_size, spare_size, QPIC_ECC_BCH8) == 0)
+            {
+                if (check_mibib_magic(prog->page.buf, page_size))
+                {
+                    np_resp_scan_mibib_t resp;
+                    resp.header.code = NP_RESP_DATA;
+                    resp.header.info = sizeof(resp) - sizeof(resp.header);
+                    resp.mibib_offset = (uint64_t)block * prog->chip_info.block_size;
+                    resp.qpic_mode = 8;
+                    memset(resp.reserved, 0, sizeof(resp.reserved));
+                    return np_comm_cb->send((uint8_t *)&resp, sizeof(resp));
+                }
             }
         }
     }

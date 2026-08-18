@@ -25,8 +25,8 @@ std::size_t status_payload_size(std::uint8_t info) {
     case Status::error:
     case Status::bad_block:
     case Status::bad_block_skip:
-        return 12;
     case Status::write_ack:
+        return 12;
     case Status::progress:
         return 8;
     }

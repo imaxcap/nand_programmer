@@ -50,6 +50,7 @@ public:
         responses.insert(responses.end(), {1, 3});
         for (unsigned shift = 0; shift < 64; shift += 8)
             responses.push_back(static_cast<std::uint8_t>(bytes >> shift));
+        responses.insert(responses.end(), {0, 0, 0, 0});
     }
 
     bool open_ = true;
@@ -523,6 +524,48 @@ void test_qpic_deinterleave_roundtrip() {
     require(deinterleaved_bch8 == original_data, "BCH8 deinterleave roundtrip identity");
 }
 
+void test_scan_mibib_protocol() {
+    FakeTransport transport;
+    nandprog::NandClient client(transport);
+
+    // Test successful scan_mibib response
+    // Payload: uint64_t offset (e.g. 0x00040000 = 256KB), uint8_t qpic_mode (4 = BCH4)
+    std::vector<std::uint8_t> payload = {
+        0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, // 0x40000
+        0x04,                                           // BCH4
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00        // reserved
+    };
+    transport.responses.push_back(0); // ResponseCode::data
+    transport.responses.push_back(static_cast<std::uint8_t>(payload.size()));
+    transport.responses.insert(transport.responses.end(), payload.begin(), payload.end());
+
+    const auto loc = client.scan_mibib();
+    require(loc.has_value(), "scan_mibib should succeed");
+    require(loc->offset == 0x40000, "scan_mibib offset should match 0x40000");
+    require(loc->qpic_mode == 4, "scan_mibib mode should match BCH4");
+    require(!transport.packets.empty() && transport.packets.back()[0] == 0x13,
+            "scan_mibib command opcode should be 0x13");
+}
+
+void test_interruption_handling() {
+    nandprog::set_interrupted(false);
+    require(!nandprog::is_interrupted(), "initial interrupted state must be false");
+    nandprog::check_interrupted(); // should not throw
+
+    nandprog::set_interrupted(true);
+    require(nandprog::is_interrupted(), "interrupted state must be true after set");
+    bool caught = false;
+    try {
+        nandprog::check_interrupted();
+    } catch (const nandprog::Error &err) {
+        caught = true;
+        require(std::string(err.what()).find("Ctrl+C") != std::string::npos,
+                "error message must mention Ctrl+C");
+    }
+    require(caught, "check_interrupted must throw Error when interrupted");
+    nandprog::set_interrupted(false);
+}
+
 } // namespace
 
 int main() {
@@ -540,6 +583,8 @@ int main() {
         test_command_line_parser();
         test_mibib_parser();
         test_qpic_deinterleave_roundtrip();
+        test_scan_mibib_protocol();
+        test_interruption_handling();
         std::cout << "All nandprog tests passed\n";
         return 0;
     } catch (const std::exception &error) {

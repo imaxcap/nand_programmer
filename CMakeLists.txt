@@ -20,6 +20,7 @@ add_library(nandprog_core
 if(WIN32)
     target_sources(nandprog_core PRIVATE src/transport/serial_win32.cpp)
     target_compile_definitions(nandprog_core PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+    target_link_libraries(nandprog_core PRIVATE winmm)
 else()
     target_sources(nandprog_core PRIVATE src/transport/serial_posix.cpp)
 endif()
@@ -49,10 +50,17 @@ install(TARGETS nandprog RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 install(FILES data/nando_parallel_chip_db.csv
     DESTINATION ${CMAKE_INSTALL_BINDIR})
 
+if(NOT MSVC)
+    target_link_options(nandprog PRIVATE -static-libgcc -static-libstdc++)
+endif()
+
 if(NANDPROG_BUILD_TESTS)
     enable_testing()
     add_executable(nandprog_tests tests/tests.cpp)
     target_link_libraries(nandprog_tests PRIVATE nandprog_core)
+    if(NOT MSVC)
+        target_link_options(nandprog_tests PRIVATE -static-libgcc -static-libstdc++)
+    endif()
     target_compile_definitions(nandprog_tests PRIVATE
         NANDPROG_TEST_DB="${CMAKE_CURRENT_SOURCE_DIR}/data/nando_parallel_chip_db.csv")
     add_test(NAME nandprog_tests COMMAND nandprog_tests)

@@ -64,6 +64,7 @@ public:
 
 private:
     Transport &transport_;
+    mutable std::optional<protocol::FirmwareVersion> cached_version_;
 
     protocol::Response expect_data(unsigned timeout_ms);
     void expect_ok(unsigned timeout_ms,

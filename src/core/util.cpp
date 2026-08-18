@@ -2,10 +2,18 @@
 
 #include "nandprog/error.hpp"
 
+#include <atomic>
 #include <cctype>
+#include <csignal>
 #include <iomanip>
 #include <iostream>
 #include <sstream>
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
 
 namespace nandprog {
 
@@ -137,6 +145,50 @@ std::string hex_dump(const std::uint8_t *data, std::size_t size, std::size_t max
     if (size > max_bytes)
         stream << " ... (" << size << " bytes total)";
     return stream.str();
+}
+
+namespace {
+std::atomic<bool> g_interrupted{false};
+
+#ifdef _WIN32
+static BOOL WINAPI ConsoleCtrlHandler(DWORD ctrl_type) {
+    if (ctrl_type == CTRL_C_EVENT || ctrl_type == CTRL_BREAK_EVENT) {
+        g_interrupted.store(true);
+        return TRUE;
+    }
+    return FALSE;
+}
+#else
+static void PosixSigintHandler(int) {
+    g_interrupted.store(true);
+}
+#endif
+} // namespace
+
+void install_signal_handlers() {
+#ifdef _WIN32
+    SetConsoleCtrlHandler(ConsoleCtrlHandler, TRUE);
+#else
+    struct sigaction sa{};
+    sa.sa_handler = PosixSigintHandler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;
+    sigaction(SIGINT, &sa, nullptr);
+#endif
+}
+
+void set_interrupted(bool interrupted) {
+    g_interrupted.store(interrupted);
+}
+
+bool is_interrupted() {
+    return g_interrupted.load();
+}
+
+void check_interrupted() {
+    if (g_interrupted.load()) {
+        throw Error("Operation cancelled by user (Ctrl+C)");
+    }
 }
 
 } // namespace nandprog

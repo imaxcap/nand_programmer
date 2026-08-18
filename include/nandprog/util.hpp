@@ -17,4 +17,9 @@ bool is_debug_enabled();
 void log_debug(const std::string &message);
 std::string hex_dump(const std::uint8_t *data, std::size_t size, std::size_t max_bytes = 32);
 
+void install_signal_handlers();
+void set_interrupted(bool interrupted);
+bool is_interrupted();
+void check_interrupted();
+
 } // namespace nandprog

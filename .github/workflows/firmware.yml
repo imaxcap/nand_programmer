@@ -2,12 +2,18 @@ name: Firmware
 
 on:
   push:
+    paths:
+      - 'firmware/**'
+      - '.github/workflows/firmware.yml'
   pull_request:
+    paths:
+      - 'firmware/**'
+      - '.github/workflows/firmware.yml'
   workflow_dispatch:
 
 jobs:
   build-firmware:
-    name: Build STM32 Firmware (v3.7.1)
+    name: Build STM32 Firmware (v3.7.2)
     runs-on: ubuntu-latest
 
     steps:

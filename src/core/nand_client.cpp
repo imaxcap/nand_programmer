@@ -33,9 +33,10 @@ protocol::FirmwareVersion NandClient::firmware_version() {
     const auto response = expect_data(control_timeout_ms);
     if (response.payload.size() != 4)
         throw Error("Firmware returned an invalid version response");
-    return {response.payload[0], response.payload[1],
+    cached_version_ = protocol::FirmwareVersion{response.payload[0], response.payload[1],
             static_cast<std::uint16_t>(response.payload[2] |
                                        (response.payload[3] << 8))};
+    return *cached_version_;
 }
 
 protocol::ChipId NandClient::read_id() {
@@ -316,11 +317,21 @@ void NandClient::write_pages(const PageProvider &provide_page,
     }
 
     std::vector<std::uint8_t> page(transfer_page_size);
-    std::uint64_t transferred = 0;
-    while (transferred < length) {
+    std::uint64_t bytes_sent = 0;
+    std::uint64_t bytes_acked = 0;
+
+    // Sliding window: keep 4 pages in-flight (8KB) for firmware >= 3.6.0, 1 page for legacy <= 3.5.0
+    std::size_t max_in_flight_pages = 4;
+    if (cached_version_.has_value() &&
+        (cached_version_->major < 3 || (cached_version_->major == 3 && cached_version_->minor < 6))) {
+        max_in_flight_pages = 1;
+    }
+    const std::uint64_t max_in_flight_bytes = static_cast<std::uint64_t>(max_in_flight_pages) * transfer_page_size;
+
+    auto send_next_page = [&]() {
         provide_page(page.data(), page.size());
-        log_debug("write_pages: sending page at offset=" + hex_number(address + transferred) +
-                  " (bytes=" + std::to_string(transferred) + "/" + std::to_string(length) + ")");
+        log_debug("write_pages: sending page at offset=" + hex_number(address + bytes_sent) +
+                  " (bytes=" + std::to_string(bytes_sent) + "/" + std::to_string(length) + ")");
 
         std::vector<std::uint8_t> page_packets;
         page_packets.reserve(((page.size() + protocol::max_write_payload - 1) / protocol::max_write_payload) * 64);
@@ -336,48 +347,54 @@ void NandClient::write_pages(const PageProvider &provide_page,
             page_offset += chunk_size;
         }
         transport_.write_buffer(page_packets, control_timeout_ms);
+        bytes_sent += transfer_page_size;
+    };
 
-        const std::uint64_t expected_ack = transferred + page.size();
-        log_debug("write_pages: page upload finished, waiting for write_ack (expected=" +
-                  std::to_string(expected_ack) + ", timeout=" + std::to_string(write_ack_timeout_ms) + "ms)...");
-        while (true) {
-            protocol::Response response;
-            try {
-                response = protocol::read_response(transport_, write_ack_timeout_ms);
-            } catch (const Error &error) {
-                throw Error(std::string("Timed out or failed while waiting for write_ack at bytes=") +
-                            std::to_string(transferred) + "/" +
-                            std::to_string(length) + ": " + error.what());
-            }
-            switch (response_status(response)) {
-            case protocol::Status::write_ack:
-                if (response.payload.size() < 8 ||
-                    protocol::decode_u64(response.payload.data()) != expected_ack)
-                    throw Error("Firmware returned an invalid write acknowledgement");
-                transferred = expected_ack;
-                log_debug("write_ack bytes=" + std::to_string(transferred) +
-                          ", remaining=" + std::to_string(length - transferred));
-                if (on_progress)
-                    on_progress(transferred);
-                break;
-            case protocol::Status::error:
-                log_debug("write_pages: received error response from firmware");
-                throw_firmware_error(response);
-            case protocol::Status::bad_block:
-                log_debug("write_pages: received bad_block notification before ack");
-                if (on_bad_block)
-                    on_bad_block(decode_bad_block(response, false));
-                continue;
-            case protocol::Status::bad_block_skip:
-                log_debug("write_pages: received bad_block_skip notification before ack");
-                if (on_bad_block)
-                    on_bad_block(decode_bad_block(response, true));
-                continue;
-            default:
-                log_debug("write_pages: received unexpected status " + std::to_string(static_cast<int>(response_status(response))));
-                throw Error("Unexpected status during NAND write");
+    // Pre-fill sliding window
+    while (bytes_sent < length && (bytes_sent - bytes_acked) < max_in_flight_bytes) {
+        send_next_page();
+    }
+
+    while (bytes_acked < length) {
+        protocol::Response response;
+        try {
+            response = protocol::read_response(transport_, write_ack_timeout_ms);
+        } catch (const Error &error) {
+            throw Error(std::string("Timed out or failed while waiting for write_ack at bytes=") +
+                        std::to_string(bytes_acked) + "/" +
+                        std::to_string(length) + ": " + error.what());
+        }
+        switch (response_status(response)) {
+        case protocol::Status::write_ack:
+            if (response.payload.size() < 8)
+                throw Error("Firmware returned an invalid write acknowledgement");
+            bytes_acked = protocol::decode_u64(response.payload.data());
+            log_debug("write_ack bytes=" + std::to_string(bytes_acked) +
+                      ", in_flight=" + std::to_string(bytes_sent - bytes_acked) +
+                      ", remaining=" + std::to_string(length - bytes_acked));
+            if (on_progress)
+                on_progress(bytes_acked);
+            // Advance sliding window
+            while (bytes_sent < length && (bytes_sent - bytes_acked) < max_in_flight_bytes) {
+                send_next_page();
             }
             break;
+        case protocol::Status::error:
+            log_debug("write_pages: received error response from firmware");
+            throw_firmware_error(response);
+        case protocol::Status::bad_block:
+            log_debug("write_pages: received bad_block notification before ack");
+            if (on_bad_block)
+                on_bad_block(decode_bad_block(response, false));
+            break;
+        case protocol::Status::bad_block_skip:
+            log_debug("write_pages: received bad_block_skip notification before ack");
+            if (on_bad_block)
+                on_bad_block(decode_bad_block(response, true));
+            break;
+        default:
+            log_debug("write_pages: received unexpected status " + std::to_string(static_cast<int>(response_status(response))));
+            throw Error("Unexpected status during NAND write");
         }
     }
 

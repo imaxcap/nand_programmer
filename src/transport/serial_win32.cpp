@@ -4,6 +4,7 @@
 #include "nandprog/util.hpp"
 
 #include <windows.h>
+#include <mmsystem.h>
 
 #include <algorithm>
 #include <chrono>
@@ -41,7 +42,9 @@ public:
             throw Error(windows_error("Failed to open " + device));
 
         try {
-            if (!SetupComm(handle_, 4096, 4096))
+            timeBeginPeriod(1);
+            timer_period_set_ = true;
+            if (!SetupComm(handle_, 65536, 65536))
                 throw Error(windows_error("SetupComm failed"));
             DCB dcb{};
             dcb.DCBlength = sizeof(dcb);
@@ -73,6 +76,10 @@ public:
     }
 
     void close() noexcept override {
+        if (timer_period_set_) {
+            timeEndPeriod(1);
+            timer_period_set_ = false;
+        }
         if (is_open()) {
             log_debug("Win32SerialTransport: closing port handle");
             CloseHandle(handle_);
@@ -104,6 +111,7 @@ public:
         set_timeouts(timeout_ms);
         std::size_t offset = 0;
         while (offset < size) {
+            check_interrupted();
             DWORD written = 0;
             if (!WriteFile(handle_, data + offset, static_cast<DWORD>(size - offset), &written, nullptr))
                 throw Error(windows_error("Serial buffer write failed"));
@@ -120,7 +128,9 @@ public:
         const auto deadline = start_time + std::chrono::milliseconds(timeout_ms);
         log_debug("Win32 RX waiting for " + std::to_string(size) + "B (timeout=" + std::to_string(timeout_ms) + "ms)...");
         std::size_t offset = 0;
+        unsigned spin_count = 0;
         while (offset < size) {
+            check_interrupted();
             const auto now = Clock::now();
             if (now >= deadline) {
                 const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - start_time).count();
@@ -133,9 +143,16 @@ public:
             if (!ReadFile(handle_, data + offset, requested, &count, nullptr))
                 throw Error(windows_error("Serial read failed"));
             if (count == 0) {
-                Sleep(1);
+                if (spin_count++ < 50) {
+                    YieldProcessor();
+                } else if (spin_count < 200) {
+                    Sleep(0);
+                } else {
+                    Sleep(1);
+                }
                 continue;
             }
+            spin_count = 0;
             log_debug("Win32 RX got " + std::to_string(count) + "B: " + hex_dump(data + offset, count));
             offset += count;
         }
@@ -150,6 +167,7 @@ public:
 
 private:
     HANDLE handle_ = INVALID_HANDLE_VALUE;
+    bool timer_period_set_ = false;
 
     void set_timeouts(unsigned timeout_ms) {
         COMMTIMEOUTS timeouts{};

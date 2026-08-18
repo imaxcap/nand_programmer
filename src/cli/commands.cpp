@@ -14,6 +14,10 @@
 #include <optional>
 #include <sstream>
 #include <thread>
+#ifndef _WIN32
+#include <termios.h>
+#include <unistd.h>
+#endif
 
 namespace nandprog {
 namespace {
@@ -90,6 +94,7 @@ public:
           last_update_time_(start_time_) {}
 
     void update(std::uint64_t value) {
+        check_interrupted();
         if (total_ == 0)
             return;
         const auto now = std::chrono::steady_clock::now();
@@ -275,15 +280,426 @@ CommandShell::CommandShell(GlobalOptions options,
     }
 }
 
+static std::vector<std::string> s_cmd_history;
+
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#include <io.h>
+
+static bool is_stdin_console() {
+    HANDLE h_in = GetStdHandle(STD_INPUT_HANDLE);
+    DWORD mode = 0;
+    return (h_in != INVALID_HANDLE_VALUE && GetConsoleMode(h_in, &mode) != 0);
+}
+
+static bool read_interactive_line_win32(const std::string &prompt, std::string &out_line) {
+    HANDLE h_in = GetStdHandle(STD_INPUT_HANDLE);
+    if (!is_stdin_console()) {
+        std::cout << prompt << std::flush;
+        if (!std::getline(std::cin, out_line)) {
+            return false;
+        }
+        if (out_line.find('\x04') != std::string::npos) {
+            return false;
+        }
+        return true;
+    }
+
+    DWORD orig_mode = 0;
+    GetConsoleMode(h_in, &orig_mode);
+    SetConsoleMode(h_in, ENABLE_EXTENDED_FLAGS);
+
+    out_line.clear();
+    std::size_t cursor_pos = 0;
+    std::size_t hist_idx = s_cmd_history.size();
+    std::size_t max_rendered_len = 0;
+
+    auto refresh_line = [&](std::size_t prev_len) {
+        std::size_t spaces = (prev_len > out_line.size()) ? (prev_len - out_line.size() + 2) : 2;
+        std::cout << "\r" << prompt << out_line << std::string(spaces, ' ') << "\r" << prompt;
+        if (cursor_pos > 0) {
+            std::cout.write(out_line.data(), cursor_pos);
+        }
+        std::cout.flush();
+        if (out_line.size() > max_rendered_len) max_rendered_len = out_line.size();
+    };
+
+    std::cout << prompt << std::flush;
+
+    while (true) {
+        INPUT_RECORD rec;
+        DWORD read_count = 0;
+        if (!ReadConsoleInputW(h_in, &rec, 1, &read_count) || read_count == 0) {
+            if (is_interrupted()) {
+                set_interrupted(false);
+                std::cout << "^C\n" << prompt << std::flush;
+                out_line.clear();
+                cursor_pos = 0;
+                hist_idx = s_cmd_history.size();
+                max_rendered_len = 0;
+                continue;
+            }
+            continue;
+        }
+
+        if (rec.EventType != KEY_EVENT || !rec.Event.KeyEvent.bKeyDown) {
+            continue;
+        }
+
+        const auto &key = rec.Event.KeyEvent;
+        const WCHAR wch = key.uChar.UnicodeChar;
+        const WORD vk = key.wVirtualKeyCode;
+        const bool ctrl_pressed = (key.dwControlKeyState & (LEFT_CTRL_PRESSED | RIGHT_CTRL_PRESSED)) != 0;
+
+        // 1. Ctrl+C
+        if (wch == 3 || (ctrl_pressed && (vk == 'C' || vk == 'c'))) {
+            set_interrupted(false);
+            std::cout << "^C\n" << prompt << std::flush;
+            out_line.clear();
+            cursor_pos = 0;
+            hist_idx = s_cmd_history.size();
+            max_rendered_len = 0;
+            continue;
+        }
+
+        // 2. Ctrl+D
+        if (wch == 4 || (ctrl_pressed && (vk == 'D' || vk == 'd'))) {
+            if (out_line.empty()) {
+                std::cout << "\n";
+                SetConsoleMode(h_in, orig_mode);
+                return false;
+            }
+            if (cursor_pos < out_line.size()) {
+                std::size_t old_len = max_rendered_len;
+                out_line.erase(cursor_pos, 1);
+                refresh_line(old_len);
+            }
+            continue;
+        }
+
+        // 3. Ctrl+Z
+        if (wch == 26 || (ctrl_pressed && (vk == 'Z' || vk == 'z'))) {
+            if (out_line.empty()) {
+                std::cout << "\n";
+                SetConsoleMode(h_in, orig_mode);
+                return false;
+            }
+            continue;
+        }
+
+        // 4. Enter
+        if (wch == L'\r' || wch == L'\n' || vk == VK_RETURN) {
+            std::cout << "\n";
+            SetConsoleMode(h_in, orig_mode);
+            if (!out_line.empty()) {
+                if (s_cmd_history.empty() || s_cmd_history.back() != out_line) {
+                    s_cmd_history.push_back(out_line);
+                }
+            }
+            return true;
+        }
+
+        // 5. Up Arrow (Previous History)
+        if (vk == VK_UP) {
+            if (!s_cmd_history.empty() && hist_idx > 0) {
+                std::size_t old_len = max_rendered_len;
+                --hist_idx;
+                out_line = s_cmd_history[hist_idx];
+                cursor_pos = out_line.size();
+                refresh_line(old_len);
+            }
+            continue;
+        }
+
+        // 6. Down Arrow (Next History)
+        if (vk == VK_DOWN) {
+            if (!s_cmd_history.empty() && hist_idx < s_cmd_history.size()) {
+                std::size_t old_len = max_rendered_len;
+                ++hist_idx;
+                if (hist_idx < s_cmd_history.size()) {
+                    out_line = s_cmd_history[hist_idx];
+                } else {
+                    out_line.clear();
+                }
+                cursor_pos = out_line.size();
+                refresh_line(old_len);
+            }
+            continue;
+        }
+
+        // 7. Left Arrow
+        if (vk == VK_LEFT) {
+            if (cursor_pos > 0) {
+                --cursor_pos;
+                refresh_line(max_rendered_len);
+            }
+            continue;
+        }
+
+        // 8. Right Arrow
+        if (vk == VK_RIGHT) {
+            if (cursor_pos < out_line.size()) {
+                ++cursor_pos;
+                refresh_line(max_rendered_len);
+            }
+            continue;
+        }
+
+        // 9. Home Key
+        if (vk == VK_HOME) {
+            cursor_pos = 0;
+            refresh_line(max_rendered_len);
+            continue;
+        }
+
+        // 10. End Key
+        if (vk == VK_END) {
+            cursor_pos = out_line.size();
+            refresh_line(max_rendered_len);
+            continue;
+        }
+
+        // 11. Backspace
+        if (wch == L'\b' || vk == VK_BACK) {
+            if (cursor_pos > 0) {
+                std::size_t old_len = max_rendered_len;
+                out_line.erase(cursor_pos - 1, 1);
+                --cursor_pos;
+                refresh_line(old_len);
+            }
+            continue;
+        }
+
+        // 12. Delete
+        if (vk == VK_DELETE) {
+            if (cursor_pos < out_line.size()) {
+                std::size_t old_len = max_rendered_len;
+                out_line.erase(cursor_pos, 1);
+                refresh_line(old_len);
+            }
+            continue;
+        }
+
+        // 13. Printable Character
+        if (wch >= 32) {
+            char utf8_buf[8] = {0};
+            int len = WideCharToMultiByte(CP_UTF8, 0, &wch, 1, utf8_buf, sizeof(utf8_buf) - 1, nullptr, nullptr);
+            if (len > 0) {
+                std::size_t old_len = max_rendered_len;
+                out_line.insert(cursor_pos, utf8_buf, len);
+                cursor_pos += len;
+                refresh_line(old_len);
+            }
+        }
+    }
+}
+#else
+static bool is_stdin_tty() {
+    return isatty(STDIN_FILENO) != 0;
+}
+
+static bool read_interactive_line_posix(const std::string &prompt, std::string &out_line) {
+    if (!is_stdin_tty()) {
+        std::cout << prompt << std::flush;
+        if (!std::getline(std::cin, out_line)) {
+            return false;
+        }
+        return true;
+    }
+
+    struct termios orig_termios;
+    if (tcgetattr(STDIN_FILENO, &orig_termios) != 0) {
+        std::cout << prompt << std::flush;
+        return static_cast<bool>(std::getline(std::cin, out_line));
+    }
+
+    struct termios raw = orig_termios;
+    raw.c_lflag &= ~(ECHO | ICANON | ISIG | IEXTEN);
+    raw.c_iflag &= ~(IXON | ICRNL);
+    raw.c_cc[VMIN] = 1;
+    raw.c_cc[VTIME] = 0;
+    tcsetattr(STDIN_FILENO, TCSANOW, &raw);
+
+    out_line.clear();
+    std::size_t cursor_pos = 0;
+    std::size_t hist_idx = s_cmd_history.size();
+    std::size_t max_rendered_len = 0;
+
+    auto refresh_line = [&](std::size_t prev_len) {
+        std::size_t spaces = (prev_len > out_line.size()) ? (prev_len - out_line.size() + 2) : 2;
+        std::cout << "\r" << prompt << out_line << std::string(spaces, ' ') << "\r" << prompt;
+        if (cursor_pos > 0) {
+            std::cout.write(out_line.data(), cursor_pos);
+        }
+        std::cout.flush();
+        if (out_line.size() > max_rendered_len) max_rendered_len = out_line.size();
+    };
+
+    std::cout << prompt << std::flush;
+
+    while (true) {
+        char c = 0;
+        ssize_t n = ::read(STDIN_FILENO, &c, 1);
+        if (n <= 0) {
+            if (is_interrupted()) {
+                set_interrupted(false);
+                std::cout << "^C\r\n" << prompt << std::flush;
+                out_line.clear();
+                cursor_pos = 0;
+                hist_idx = s_cmd_history.size();
+                max_rendered_len = 0;
+                continue;
+            }
+            continue;
+        }
+
+        // 1. Ctrl+C (ASCII 3)
+        if (c == 3) {
+            set_interrupted(false);
+            std::cout << "^C\r\n" << prompt << std::flush;
+            out_line.clear();
+            cursor_pos = 0;
+            hist_idx = s_cmd_history.size();
+            max_rendered_len = 0;
+            continue;
+        }
+
+        // 2. Ctrl+D (ASCII 4)
+        if (c == 4) {
+            if (out_line.empty()) {
+                std::cout << "\r\n";
+                tcsetattr(STDIN_FILENO, TCSANOW, &orig_termios);
+                return false;
+            }
+            if (cursor_pos < out_line.size()) {
+                std::size_t old_len = max_rendered_len;
+                out_line.erase(cursor_pos, 1);
+                refresh_line(old_len);
+            }
+            continue;
+        }
+
+        // 3. Enter (\r or \n)
+        if (c == '\r' || c == '\n') {
+            std::cout << "\r\n";
+            tcsetattr(STDIN_FILENO, TCSANOW, &orig_termios);
+            if (!out_line.empty()) {
+                if (s_cmd_history.empty() || s_cmd_history.back() != out_line) {
+                    s_cmd_history.push_back(out_line);
+                }
+            }
+            return true;
+        }
+
+        // 4. Backspace (ASCII 127 or 8)
+        if (c == 127 || c == 8) {
+            if (cursor_pos > 0) {
+                std::size_t old_len = max_rendered_len;
+                out_line.erase(cursor_pos - 1, 1);
+                --cursor_pos;
+                refresh_line(old_len);
+            }
+            continue;
+        }
+
+        // 5. Escape Sequence (Arrow keys, Home, End, Delete)
+        if (c == 27) {
+            char seq[4] = {0};
+            if (::read(STDIN_FILENO, &seq[0], 1) <= 0) continue;
+            if (seq[0] == '[' || seq[0] == 'O') {
+                if (::read(STDIN_FILENO, &seq[1], 1) <= 0) continue;
+                if (seq[0] == '[') {
+                    if (seq[1] == 'A') { // Up Arrow (Previous History)
+                        if (!s_cmd_history.empty() && hist_idx > 0) {
+                            std::size_t old_len = max_rendered_len;
+                            --hist_idx;
+                            out_line = s_cmd_history[hist_idx];
+                            cursor_pos = out_line.size();
+                            refresh_line(old_len);
+                        }
+                        continue;
+                    } else if (seq[1] == 'B') { // Down Arrow (Next History)
+                        if (!s_cmd_history.empty() && hist_idx < s_cmd_history.size()) {
+                            std::size_t old_len = max_rendered_len;
+                            ++hist_idx;
+                            if (hist_idx < s_cmd_history.size()) {
+                                out_line = s_cmd_history[hist_idx];
+                            } else {
+                                out_line.clear();
+                            }
+                            cursor_pos = out_line.size();
+                            refresh_line(old_len);
+                        }
+                        continue;
+                    } else if (seq[1] == 'C') { // Right Arrow
+                        if (cursor_pos < out_line.size()) {
+                            ++cursor_pos;
+                            refresh_line(max_rendered_len);
+                        }
+                        continue;
+                    } else if (seq[1] == 'D') { // Left Arrow
+                        if (cursor_pos > 0) {
+                            --cursor_pos;
+                            refresh_line(max_rendered_len);
+                        }
+                        continue;
+                    } else if (seq[1] == 'H' || seq[1] == '1') { // Home
+                        cursor_pos = 0;
+                        refresh_line(max_rendered_len);
+                        if (seq[1] == '1' && ::read(STDIN_FILENO, &seq[2], 1) <= 0) {}
+                        continue;
+                    } else if (seq[1] == 'F' || seq[1] == '4') { // End
+                        cursor_pos = out_line.size();
+                        refresh_line(max_rendered_len);
+                        if (seq[1] == '4' && ::read(STDIN_FILENO, &seq[2], 1) <= 0) {}
+                        continue;
+                    } else if (seq[1] == '3') { // Delete
+                        if (::read(STDIN_FILENO, &seq[2], 1) <= 0) {}
+                        if (cursor_pos < out_line.size()) {
+                            std::size_t old_len = max_rendered_len;
+                            out_line.erase(cursor_pos, 1);
+                            refresh_line(old_len);
+                        }
+                        continue;
+                    }
+                } else if (seq[0] == 'O') {
+                    if (seq[1] == 'H') { cursor_pos = 0; refresh_line(max_rendered_len); continue; }
+                    if (seq[1] == 'F') { cursor_pos = out_line.size(); refresh_line(max_rendered_len); continue; }
+                }
+            }
+            continue;
+        }
+
+        // 6. Printable character
+        if (static_cast<unsigned char>(c) >= 32) {
+            std::size_t old_len = max_rendered_len;
+            out_line.insert(cursor_pos, 1, c);
+            ++cursor_pos;
+            refresh_line(old_len);
+        }
+    }
+}
+#endif
+
 int CommandShell::run_repl() {
+    install_signal_handlers();
     std::cout << "nandprog 0.2.0 - type 'help' for commands\n";
     std::string line;
     while (true) {
-        std::cout << "nand> " << std::flush;
-        if (!std::getline(std::cin, line)) {
-            std::cout << '\n';
-            return 0;
+        set_interrupted(false);
+#ifdef _WIN32
+        if (!read_interactive_line_win32("nand> ", line)) {
+            return 0; // EOF (Ctrl+D / Ctrl+Z)
         }
+#else
+        if (!read_interactive_line_posix("nand> ", line)) {
+            return 0; // EOF (Ctrl+D)
+        }
+#endif
+        set_interrupted(false);
         try {
             const auto arguments = split_command_line(line);
             if (arguments.empty())
@@ -292,20 +708,21 @@ int CommandShell::run_repl() {
                 return 0;
             (void)execute(arguments);
         } catch (const VerifyMismatch &error) {
-            std::cerr << "verify failed: " << error.what() << '\n';
+            std::cerr << "\nverify failed: " << error.what() << '\n';
         } catch (const Error &error) {
-            std::cerr << "error: " << error.what() << '\n';
+            std::cerr << "\nerror: " << error.what() << '\n';
             if (transport_ && transport_->is_open()) {
                 transport_->close();
             }
             probed_ = false;
         } catch (const std::exception &error) {
-            std::cerr << "unexpected error: " << error.what() << '\n';
+            std::cerr << "\nunexpected error: " << error.what() << '\n';
             if (transport_ && transport_->is_open()) {
                 transport_->close();
             }
             probed_ = false;
         }
+        set_interrupted(false);
     }
 }
 
@@ -1025,6 +1442,7 @@ void CommandShell::command_write_qpic(
         [&progress](std::uint64_t value) { progress.update(value); },
         [&progress](const BadBlockEvent &event) { progress.log_bad_block(event); });
     progress.finish();
+    cached_mibib_ = std::nullopt;
     std::cout << "Wrote " << input_size << " data bytes with hardware QPIC "
               << (*ecc_mode == qpic::EccMode::bch4 ? "BCH4" : "BCH8")
               << " acceleration at NAND offset "
@@ -1350,7 +1768,7 @@ std::optional<mibib::PartitionTable> CommandShell::read_mibib_table(bool force_r
     }
 
     const std::uint64_t scan_step = std::max<std::uint64_t>(chip_->block_size, 64 * 1024);
-    const std::uint64_t max_scan_limit = 8 * chip_->block_size; // Scan first 8 blocks
+    const std::uint64_t max_scan_limit = 4ULL * 1024 * 1024; // Scan up to 4MB window
     const std::uint64_t total_scan = std::min(chip_->total_size, max_scan_limit);
 
     const std::uint64_t raw_page_size = chip_->raw_page_size();

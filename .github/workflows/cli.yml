@@ -2,7 +2,19 @@ name: CLI
 
 on:
   push:
+    paths:
+      - 'src/**'
+      - 'include/**'
+      - 'tests/**'
+      - 'CMakeLists.txt'
+      - '.github/workflows/cli.yml'
   pull_request:
+    paths:
+      - 'src/**'
+      - 'include/**'
+      - 'tests/**'
+      - 'CMakeLists.txt'
+      - '.github/workflows/cli.yml'
   workflow_dispatch:
 
 jobs:
@@ -11,7 +23,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          - os: ubuntu-22.04
             artifact: nandprog-linux-x86_64
           - os: windows-latest
             artifact: nandprog-windows-x86_64

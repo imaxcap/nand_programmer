@@ -67,16 +67,23 @@ public:
             return;
         std::size_t offset = 0;
         while (offset < size) {
-            wait(POLLOUT, timeout_ms);
+            check_interrupted();
             const ssize_t written = ::write(fd_, data + offset, size - offset);
-            if (written < 0) {
-                if (errno == EINTR)
-                    continue;
-                throw Error("Serial buffer write failed: " + std::string(std::strerror(errno)));
-            }
-            if (written == 0)
+            if (written > 0) {
+                offset += static_cast<std::size_t>(written);
                 continue;
-            offset += static_cast<std::size_t>(written);
+            }
+            if (written < 0 && errno == EINTR)
+                continue;
+            if (written < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+                wait(POLLOUT, timeout_ms);
+                continue;
+            }
+            if (written == 0) {
+                wait(POLLOUT, timeout_ms);
+                continue;
+            }
+            throw Error("Serial buffer write failed: " + std::string(std::strerror(errno)));
         }
     }
 
@@ -88,26 +95,26 @@ public:
         log_debug("POSIX RX waiting for " + std::to_string(size) + "B (timeout=" + std::to_string(timeout_ms) + "ms)...");
         std::size_t offset = 0;
         while (offset < size) {
+            check_interrupted();
+            const ssize_t count = ::read(fd_, data + offset, size - offset);
+            if (count > 0) {
+                log_debug("POSIX RX got " + std::to_string(count) + "B: " + hex_dump(data + offset, count));
+                offset += static_cast<std::size_t>(count);
+                continue;
+            }
+            if (count < 0 && errno == EINTR)
+                continue;
+            if (count < 0 && (errno != EAGAIN && errno != EWOULDBLOCK))
+                throw Error("Serial read failed: " + std::string(std::strerror(errno)));
+
             const auto now = Clock::now();
             if (now >= deadline) {
                 const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - start_time).count();
                 log_debug("POSIX RX TIMEOUT after " + std::to_string(elapsed) + "ms, received " + std::to_string(offset) + "/" + std::to_string(size) + "B");
                 throw Error("Serial read timed out");
             }
-            const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
-                deadline - now);
+            const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now);
             wait(POLLIN, static_cast<unsigned>(remaining.count() + 1));
-            const ssize_t count = ::read(fd_, data + offset, size - offset);
-            if (count < 0) {
-                if (errno == EINTR)
-                    continue;
-                throw Error("Serial read failed: " +
-                            std::string(std::strerror(errno)));
-            }
-            if (count == 0)
-                continue;
-            log_debug("POSIX RX got " + std::to_string(count) + "B: " + hex_dump(data + offset, count));
-            offset += static_cast<std::size_t>(count);
         }
     }
 
@@ -154,7 +161,9 @@ private:
         pollfd descriptor{fd_, events, 0};
         int result = 0;
         do {
+            check_interrupted();
             result = ::poll(&descriptor, 1, static_cast<int>(timeout_ms));
+            check_interrupted();
         } while (result < 0 && errno == EINTR);
         if (result == 0)
             throw Error(events == POLLIN ? "Serial read timed out"

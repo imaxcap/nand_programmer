@@ -342,6 +342,18 @@ static uint32_t nand_read_data(uint8_t *buf, uint32_t page,
     if (fsmc_conf.read2_cmd != UNDEFINED_CMD)
         *(__IO uint8_t *)(Bank_NAND_ADDR | CMD_AREA) = fsmc_conf.read2_cmd;
 
+    /* Wait for NAND array to load page into internal data register (tR approx 25-35us) */
+    {
+        uint32_t rb_timeout = 0x20000;
+        while (!(GPIOD->IDR & GPIO_Pin_6) && --rb_timeout)
+        {
+            __NOP();
+        }
+        volatile uint32_t delay = 1800;
+        while (delay--)
+            __NOP();
+    }
+
     {
         uint32_t words = data_size >> 2;
         uint32_t remainder = data_size & 3;
@@ -436,6 +448,20 @@ static uint32_t nand_read_spare_data(uint8_t *buf, uint32_t page,
         break;
     default:
         break;
+    }
+
+    if (fsmc_conf.read2_cmd != UNDEFINED_CMD)
+        *(__IO uint8_t *)(Bank_NAND_ADDR | CMD_AREA) = fsmc_conf.read2_cmd;
+
+    {
+        uint32_t rb_timeout = 0x20000;
+        while (!(GPIOD->IDR & GPIO_Pin_6) && --rb_timeout)
+        {
+            __NOP();
+        }
+        volatile uint32_t delay = 1800;
+        while (delay--)
+            __NOP();
     }
 
     for (i = 0; i < data_size; i++)
