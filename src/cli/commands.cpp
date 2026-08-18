@@ -204,13 +204,75 @@ void print_chip_id(const protocol::ChipId &id) {
               << format_chip_id(id) << '\n';
 }
 
+Chip make_default_onfi_probe_chip() {
+    Chip c;
+    c.name = "Generic ONFI NAND";
+    c.page_size = 2048;
+    c.spare_size = 64;
+    c.block_size = 128 * 1024;
+    c.total_size = 128 * 1024 * 1024;
+    c.bad_block_mark_offset = 0;
+    c.parameters.fill(0);
+    c.parameters[0] = 20; // t_cs
+    c.parameters[1] = 12; // t_cls
+    c.parameters[2] = 12; // t_als
+    c.parameters[3] = 10; // t_clr
+    c.parameters[4] = 10; // t_ar
+    c.parameters[5] = 12; // t_wp
+    c.parameters[6] = 12; // t_rp
+    c.parameters[7] = 12; // t_ds
+    c.parameters[8] = 5;  // t_ch
+    c.parameters[9] = 5;  // t_clh
+    c.parameters[10] = 5; // t_alh
+    c.parameters[11] = 25;// t_wc
+    c.parameters[12] = 25;// t_rc
+    c.parameters[13] = 20;// t_rea
+    c.parameters[14] = 3; // row_cycles
+    c.parameters[15] = 2; // col_cycles
+    c.parameters[16] = 0x00; // read1
+    c.parameters[17] = 0x30; // read2
+    c.parameters[18] = 0xFF; // read_spare
+    c.parameters[19] = 0x90; // read_id
+    c.parameters[20] = 0xFF; // reset
+    c.parameters[21] = 0x80; // write1
+    c.parameters[22] = 0x10; // write2
+    c.parameters[23] = 0x60; // erase1
+    c.parameters[24] = 0xD0; // erase2
+    c.parameters[25] = 0x70; // status
+    c.parameters[26] = 0xEF; // set_features
+    c.parameters[27] = 0x90; // enable_ecc_address
+    c.parameters[28] = 0x08; // enable_ecc_value
+    c.parameters[29] = 0x00; // disable_ecc_value
+    return c;
+}
+
+std::string format_size_unit(std::uint64_t bytes) {
+    if (bytes >= 8 * 1024 * 1024) {
+        if (bytes % (1024 * 1024) == 0)
+            return std::to_string(bytes / (1024 * 1024)) + " MB";
+        std::ostringstream oss;
+        oss << std::fixed << std::setprecision(2) << (static_cast<double>(bytes) / (1024.0 * 1024.0)) << " MB";
+        return oss.str();
+    }
+    if (bytes >= 8 * 1024) {
+        if (bytes % 1024 == 0)
+            return std::to_string(bytes / 1024) + " KB";
+        std::ostringstream oss;
+        oss << std::fixed << std::setprecision(2) << (static_cast<double>(bytes) / 1024.0) << " KB";
+        return oss.str();
+    }
+    return std::to_string(bytes) + " B";
+}
+
 } // namespace
 
 CommandShell::CommandShell(GlobalOptions options,
                            std::unique_ptr<Transport> transport)
     : options_(std::move(options)), transport_(std::move(transport)),
       client_(*transport_) {
-    database_.load(options_.database);
+    if (!options_.database.empty() && std::filesystem::is_regular_file(options_.database)) {
+        database_.load(options_.database);
+    }
 }
 
 int CommandShell::run_repl() {
@@ -233,8 +295,16 @@ int CommandShell::run_repl() {
             std::cerr << "verify failed: " << error.what() << '\n';
         } catch (const Error &error) {
             std::cerr << "error: " << error.what() << '\n';
+            if (transport_ && transport_->is_open()) {
+                transport_->close();
+            }
+            probed_ = false;
         } catch (const std::exception &error) {
             std::cerr << "unexpected error: " << error.what() << '\n';
+            if (transport_ && transport_->is_open()) {
+                transport_->close();
+            }
+            probed_ = false;
         }
     }
 }
@@ -324,17 +394,25 @@ void CommandShell::command_id(const std::vector<std::string> &arguments) {
     ensure_open();
 
     firmware_version_ = client_.firmware_version();
-    if (!probed_)
-        client_.configure(database_.first());
+    if (!probed_) {
+        if (database_.empty())
+            client_.configure(make_default_onfi_probe_chip());
+        else
+            client_.configure(database_.first());
+    }
     chip_id_ = client_.read_id();
 
     print_firmware_version(firmware_version_);
     print_chip_id(chip_id_);
-    const Chip *match = database_.find_by_id(chip_id_);
-    if (match == nullptr)
-        std::cout << "Database match: none\n";
-    else
-        std::cout << "Database match: " << match->name << '\n';
+    if (database_.empty()) {
+        std::cout << "Database match: none (No CSV database loaded)\n";
+    } else {
+        const Chip *match = database_.find_by_id(chip_id_);
+        if (match == nullptr)
+            std::cout << "Database match: none\n";
+        else
+            std::cout << "Database match: " << match->name << '\n';
+    }
 }
 
 void CommandShell::command_probe(const std::vector<std::string> &arguments) {
@@ -347,7 +425,10 @@ void CommandShell::command_probe(const std::vector<std::string> &arguments) {
     if (arguments.size() == 2)
         forced = arguments[1];
 
+    dynamic_chip_ = std::nullopt;
     if (forced) {
+        if (database_.empty())
+            throw Error("Forced chip lookup requires database CSV file (use --db PATH)");
         chip_ = database_.find_by_name(*forced);
         if (chip_ == nullptr)
             throw Error("Chip not found in database: " + *forced);
@@ -356,7 +437,10 @@ void CommandShell::command_probe(const std::vector<std::string> &arguments) {
         print_firmware_version(firmware_version_);
         print_chip_id(chip_id_);
     } else {
-        client_.configure(database_.first());
+        if (database_.empty())
+            client_.configure(make_default_onfi_probe_chip());
+        else
+            client_.configure(database_.first());
         chip_id_ = client_.read_id();
         print_firmware_version(firmware_version_);
         print_chip_id(chip_id_);
@@ -406,6 +490,12 @@ void CommandShell::command_probe(const std::vector<std::string> &arguments) {
             dynamic_chip_ = c;
             chip_ = &(*dynamic_chip_);
         } else {
+            if (database_.empty()) {
+                std::ostringstream message;
+                message << "Unknown NAND ID:" << format_chip_id(chip_id_);
+                message << " (Non-ONFI chip and no database CSV loaded; use --db PATH)";
+                throw Error(message.str());
+            }
             chip_ = database_.find_by_id(chip_id_);
             if (chip_ == nullptr) {
                 std::ostringstream message;
@@ -425,19 +515,46 @@ void CommandShell::command_probe(const std::vector<std::string> &arguments) {
 void CommandShell::command_info() const {
     if (!probed_ || chip_ == nullptr)
         throw Error("Run probe first");
+
+    const std::uint64_t data_mb = chip_->total_size / (1024 * 1024);
+    const std::uint64_t spare_total_bytes = chip_->page_count() * chip_->spare_size;
+    const std::uint64_t spare_mb = spare_total_bytes / (1024 * 1024);
+
+    std::string capacity_str;
+    if (spare_mb > 0) {
+        capacity_str = std::to_string(data_mb) + "+" + std::to_string(spare_mb) + " MB";
+    } else {
+        const std::uint64_t spare_kb = spare_total_bytes / 1024;
+        if (spare_kb > 0) {
+            capacity_str = std::to_string(data_mb) + " MB (" + std::to_string(spare_kb) + " KB spare)";
+        } else {
+            capacity_str = std::to_string(data_mb) + " MB";
+        }
+    }
+
+    std::string page_str;
+    if (chip_->page_size >= 8 * 1024) {
+        page_str = format_size_unit(chip_->page_size) + "+" + std::to_string(chip_->spare_size) + " B";
+    } else {
+        page_str = std::to_string(chip_->page_size) + "+" + std::to_string(chip_->spare_size) + " B";
+    }
+
     std::cout << "Device:          " << options_.device << '\n'
               << "Chip:            " << chip_->name << '\n'
               << "NAND ID:         " << format_chip_id(chip_id_) << '\n'
-              << "Data page:       " << chip_->page_size << " bytes\n"
-              << "OOB:             " << chip_->spare_size << " bytes\n"
-              << "Raw page:        " << chip_->raw_page_size() << " bytes\n"
-              << "Block:           " << chip_->block_size << " data bytes\n"
-              << "Pages:           " << chip_->page_count() << '\n'
-              << "Data capacity:   " << chip_->total_size << " bytes\n"
-              << "Raw capacity:    " << chip_->raw_total_size() << " bytes\n"
+              << "Page:            " << page_str << '\n'
+              << "Block:           " << format_size_unit(chip_->block_size)
+              << " (" << (chip_->block_size / chip_->page_size) << " pages)\n"
+              << "Pages / Blocks:  " << chip_->page_count() << " / "
+              << (chip_->total_size / chip_->block_size) << '\n'
+              << "Capacity:        " << capacity_str << '\n'
               << "BB mark offset:  "
               << static_cast<unsigned>(chip_->bad_block_mark_offset) << '\n'
-              << "Geometry source: " << options_.database.string() << '\n';
+              << "Geometry source: "
+              << (dynamic_chip_.has_value()
+                      ? "ONFI 1.0 Parameter Page (Hardware Auto-Discovery)"
+                      : (options_.database.empty() ? "None" : options_.database.string()))
+              << '\n';
 }
 
 void CommandShell::command_read(const std::vector<std::string> &arguments,
@@ -869,8 +986,6 @@ void CommandShell::command_write_qpic(
     if (data_address % chip_->page_size != 0)
         throw Error("QPIC NAND offset must be data-page aligned");
 
-    const qpic::PageEncoder encoder(chip_->page_size, chip_->spare_size,
-                                    *ecc_mode);
     const std::uint64_t page_count =
         rounded_up(input_size, chip_->page_size) / chip_->page_size;
     const std::uint64_t start_page = data_address / chip_->page_size;
@@ -878,53 +993,41 @@ void CommandShell::command_write_qpic(
         page_count > chip_->page_count() - start_page)
         throw Error("QPIC image does not fit in the selected chip range");
 
-    const std::uint64_t raw_page_size = encoder.raw_page_size();
-    const std::uint64_t raw_address =
-        checked_product(start_page, raw_page_size, "QPIC raw write address");
-    const std::uint64_t raw_length =
-        checked_product(page_count, raw_page_size, "QPIC raw write length");
+    const std::uint64_t write_length = page_count * chip_->page_size;
 
     std::ifstream input(path, std::ios::binary);
     if (!input)
         throw Error("Failed to open input file: " + path.string());
     transport_->flush();
     std::uint64_t remaining = input_size;
-    ProgressDisplay progress("write.qpic", raw_length);
+    ProgressDisplay progress("write.qpic", write_length);
     protocol::Flags flags;
     flags.skip_bad = true;
-    flags.include_spare = true;
+    flags.include_spare = false;
     flags.enable_hardware_ecc = false;
-
-    if (firmware_version_.major == 3 && firmware_version_.minor <= 5) {
-        std::cerr << "warning: firmware 3.5.x acknowledges write-end before "
-                     "checking the final NAND busy/status; read.raw and compare "
-                     "the result\n";
-    }
+    flags.qpic_bch4 = (*ecc_mode == qpic::EccMode::bch4);
+    flags.qpic_bch8 = (*ecc_mode == qpic::EccMode::bch8);
 
     client_.write_pages(
-        [&](std::uint8_t *raw_page, std::size_t size) {
+        [&](std::uint8_t *page, std::size_t size) {
+            std::fill_n(page, size, static_cast<std::uint8_t>(0x00));
             const std::size_t data_size = static_cast<std::size_t>(
                 std::min<std::uint64_t>(remaining, chip_->page_size));
-            std::vector<std::uint8_t> data(data_size);
-            input.read(reinterpret_cast<char *>(data.data()),
-                       static_cast<std::streamsize>(data.size()));
+            input.read(reinterpret_cast<char *>(page),
+                       static_cast<std::streamsize>(data_size));
             if (input.bad() || input.gcount() !=
-                                   static_cast<std::streamsize>(data.size()))
+                                   static_cast<std::streamsize>(data_size))
                 throw Error("Failed to read input file during QPIC write");
-            const auto encoded = encoder.encode(data.data(), data.size());
-            if (encoded.size() != size)
-                throw Error("Internal QPIC raw page size mismatch");
-            std::copy(encoded.begin(), encoded.end(), raw_page);
             remaining -= data_size;
         },
-        raw_address, raw_length, static_cast<std::uint32_t>(raw_page_size),
+        data_address, write_length, chip_->page_size,
         flags,
         [&progress](std::uint64_t value) { progress.update(value); },
         [&progress](const BadBlockEvent &event) { progress.log_bad_block(event); });
     progress.finish();
-    std::cout << "Wrote " << input_size << " data bytes as QPIC "
+    std::cout << "Wrote " << input_size << " data bytes with hardware QPIC "
               << (*ecc_mode == qpic::EccMode::bch4 ? "BCH4" : "BCH8")
-              << " (" << raw_length << " raw bytes) at NAND offset "
+              << " acceleration at NAND offset "
               << hex_number(data_address) << '\n';
 }
 
@@ -1012,13 +1115,6 @@ void CommandShell::command_read_qpic(const std::vector<std::string> &arguments) 
                   << ", oob=" << chip_->spare_size << ")\n";
     }
 
-    const qpic::PageEncoder encoder(chip_->page_size, chip_->spare_size, *ecc_mode);
-    const std::uint64_t raw_page_size = encoder.raw_page_size();
-    const std::uint64_t page_count = length / chip_->page_size;
-    const std::uint64_t start_page = data_address / chip_->page_size;
-    const std::uint64_t raw_address = checked_product(start_page, raw_page_size, "QPIC raw read address");
-    const std::uint64_t raw_length = checked_product(page_count, raw_page_size, "QPIC raw read length");
-
     const std::filesystem::path path = file_arg;
     std::ofstream output(path, std::ios::binary);
     if (!output)
@@ -1028,27 +1124,21 @@ void CommandShell::command_read_qpic(const std::vector<std::string> &arguments) 
     ProgressDisplay progress("read.qpic", length);
     protocol::Flags flags;
     flags.skip_bad = true;
-    flags.include_spare = true;
+    flags.include_spare = false;
     flags.enable_hardware_ecc = false;
+    flags.qpic_bch4 = (*ecc_mode == qpic::EccMode::bch4);
+    flags.qpic_bch8 = (*ecc_mode == qpic::EccMode::bch8);
 
-    std::vector<std::uint8_t> raw_page_buf;
     client_.read(
-        raw_address, raw_length, flags,
+        data_address, length, flags,
         [&](const std::uint8_t *data, std::size_t size) {
-            raw_page_buf.insert(raw_page_buf.end(), data, data + size);
-            while (raw_page_buf.size() >= raw_page_size && remaining > 0) {
-                auto user_data = mibib::deinterleave_qpic(
-                    raw_page_buf.data(), raw_page_size, chip_->page_size, chip_->spare_size);
-                raw_page_buf.erase(raw_page_buf.begin(), raw_page_buf.begin() + raw_page_size);
-
-                const std::size_t to_write = static_cast<std::size_t>(
-                    std::min<std::uint64_t>(remaining, user_data.size()));
-                if (to_write > 0) {
-                    output.write(reinterpret_cast<const char *>(user_data.data()),
-                                 static_cast<std::streamsize>(to_write));
-                    remaining -= to_write;
-                    progress.update(length - remaining);
-                }
+            const std::size_t to_write = static_cast<std::size_t>(
+                std::min<std::uint64_t>(remaining, size));
+            if (to_write > 0) {
+                output.write(reinterpret_cast<const char *>(data),
+                             static_cast<std::streamsize>(to_write));
+                remaining -= to_write;
+                progress.update(length - remaining);
             }
         },
         nullptr,
@@ -1057,7 +1147,7 @@ void CommandShell::command_read_qpic(const std::vector<std::string> &arguments) 
 
     std::cout << "Read " << length << " bytes from " << target_desc
               << " and saved to " << path.string()
-              << " (deinterleaved QPIC " << (*ecc_mode == qpic::EccMode::bch4 ? "BCH4" : "BCH8") << ")\n";
+              << " (hardware deinterleaved QPIC " << (*ecc_mode == qpic::EccMode::bch4 ? "BCH4" : "BCH8") << ")\n";
 }
 
 void CommandShell::command_verify_qpic(const std::vector<std::string> &arguments) {
@@ -1156,13 +1246,6 @@ void CommandShell::command_verify_qpic(const std::vector<std::string> &arguments
                   << ", oob=" << chip_->spare_size << ")\n";
     }
 
-    const qpic::PageEncoder encoder(chip_->page_size, chip_->spare_size, *ecc_mode);
-    const std::uint64_t page_count = rounded_up(input_size, chip_->page_size) / chip_->page_size;
-    const std::uint64_t start_page = data_address / chip_->page_size;
-    const std::uint64_t raw_page_size = encoder.raw_page_size();
-    const std::uint64_t raw_address = checked_product(start_page, raw_page_size, "QPIC raw verify address");
-    const std::uint64_t raw_length = checked_product(page_count, raw_page_size, "QPIC raw verify length");
-
     std::ifstream expected(path, std::ios::binary);
     if (!expected)
         throw Error("Failed to open verify file: " + path.string());
@@ -1177,56 +1260,52 @@ void CommandShell::command_verify_qpic(const std::vector<std::string> &arguments
     ProgressDisplay progress("verify.qpic", input_size);
     protocol::Flags flags;
     flags.skip_bad = true;
-    flags.include_spare = true;
+    flags.include_spare = false;
     flags.enable_hardware_ecc = false;
+    flags.qpic_bch4 = (*ecc_mode == qpic::EccMode::bch4);
+    flags.qpic_bch8 = (*ecc_mode == qpic::EccMode::bch8);
 
-    std::vector<std::uint8_t> raw_page_buf;
     client_.read(
-        raw_address, raw_length, flags,
+        data_address, input_size, flags,
         [&](const std::uint8_t *data, std::size_t size) {
-            raw_page_buf.insert(raw_page_buf.end(), data, data + size);
-            while (raw_page_buf.size() >= raw_page_size && compared < input_size) {
-                auto user_data = mibib::deinterleave_qpic(
-                    raw_page_buf.data(), raw_page_size, chip_->page_size, chip_->spare_size);
-                raw_page_buf.erase(raw_page_buf.begin(), raw_page_buf.begin() + raw_page_size);
-
-                const std::size_t to_compare = static_cast<std::size_t>(
-                    std::min<std::uint64_t>(input_size - compared, user_data.size()));
-                if (to_compare > 0) {
-                    std::vector<std::uint8_t> wanted(to_compare);
-                    expected.read(reinterpret_cast<char *>(wanted.data()),
-                                  static_cast<std::streamsize>(to_compare));
-                    if (expected.bad() || expected.gcount() != static_cast<std::streamsize>(to_compare))
-                        throw Error("Failed while reading verify file");
-
-                    if (!mismatch) {
-                        for (std::size_t i = 0; i < to_compare; ++i) {
-                            if (wanted[i] != user_data[i]) {
-                                mismatch = Mismatch{compared + i, wanted[i], user_data[i]};
-                                break;
-                            }
-                        }
-                    }
-                    compared += to_compare;
-                    progress.update(compared);
+            if (mismatch)
+                return;
+            const std::size_t compare_size = static_cast<std::size_t>(
+                std::min<std::uint64_t>(input_size - compared, size));
+            std::vector<std::uint8_t> expected_data(compare_size);
+            expected.read(reinterpret_cast<char *>(expected_data.data()),
+                          static_cast<std::streamsize>(compare_size));
+            if (expected.bad() ||
+                expected.gcount() != static_cast<std::streamsize>(compare_size))
+                throw Error("Failed to read expected verify file");
+            for (std::size_t index = 0; index < compare_size; ++index) {
+                if (data[index] != expected_data[index]) {
+                    mismatch = Mismatch{compared + index, expected_data[index],
+                                        data[index]};
+                    break;
                 }
             }
+            compared += compare_size;
+            progress.update(compared);
         },
         nullptr,
         [&progress](const BadBlockEvent &event) { progress.log_bad_block(event); });
     progress.finish();
 
     if (mismatch) {
-        std::ostringstream message;
-        message << "mismatch at image offset " << hex_number(mismatch->offset)
-                << ": expected " << hex_number(mismatch->expected, 2)
-                << ", got " << hex_number(mismatch->actual, 2);
-        throw VerifyMismatch(mismatch->offset, mismatch->expected,
-                             mismatch->actual, message.str());
+        std::ostringstream ss;
+        ss << "Verification failed at file offset "
+           << hex_number(mismatch->offset) << " (NAND offset "
+           << hex_number(data_address + mismatch->offset) << "): expected "
+           << hex_number(mismatch->expected, 2) << ", got "
+           << hex_number(mismatch->actual, 2);
+        throw Error(ss.str());
     }
-    std::cout << "Verified " << input_size << " bytes successfully against "
-              << target_desc << " (deinterleaved QPIC "
-              << (*ecc_mode == qpic::EccMode::bch4 ? "BCH4" : "BCH8") << ")\n";
+
+    std::cout << "Verified " << input_size << " bytes against "
+              << target_desc << " successfully (hardware QPIC "
+              << (*ecc_mode == qpic::EccMode::bch4 ? "BCH4" : "BCH8")
+              << ")\n";
 }
 
 std::optional<mibib::PartitionTable> CommandShell::read_mibib_table(bool force_refresh) {

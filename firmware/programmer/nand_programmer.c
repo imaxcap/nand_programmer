@@ -12,6 +12,7 @@
 #include "version.h"
 #include "flash.h"
 #include "spi_flash.h"
+#include "qpic.h"
 #include <stdio.h>
 #include <string.h>
 #include <stddef.h>
@@ -82,6 +83,9 @@ typedef struct __attribute__((__packed__))
     uint8_t skip_bb : 1;
     uint8_t inc_spare : 1;
     uint8_t enable_hw_ecc: 1;
+    uint8_t qpic_bch4 : 1;
+    uint8_t qpic_bch8 : 1;
+    uint8_t reserved : 3;
 } np_cmd_flags_t;
 
 typedef struct __attribute__((__packed__))
@@ -287,6 +291,7 @@ typedef struct
     chip_info_t chip_info;
     uint8_t active_image;
     uint8_t hal;
+    uint8_t qpic_ecc;
 } np_prog_t;
 
 typedef struct
@@ -301,6 +306,7 @@ static np_prog_t prog;
 
 static flash_hal_t *hal[] = { &hal_fsmc, &hal_spi };
 static int np_nand_handle_status(np_prog_t *prog);
+static uint8_t qpic_raw_buf[NP_MAX_PAGE_SIZE];
 
 uint8_t np_packet_send_buf[NP_PACKET_BUF_SIZE];
 
@@ -765,14 +771,48 @@ static void nand_re_mark_bad_block(np_prog_t *prog, uint32_t block_page)
 }
 
 static uint8_t test_read_buf[NP_MAX_PAGE_SIZE];
+static uint8_t test_write_buf[NP_MAX_PAGE_SIZE];
+
+static void nand_test_prepare_page(np_prog_t *prog, uint32_t page_num, uint32_t seed, uint8_t *out_raw, uint32_t data_page_size, uint32_t spare_size, qpic_ecc_mode_t qpic_ecc)
+{
+    nand_generate_prbs_page(page_num, seed, prog->page.buf, data_page_size);
+    if (qpic_ecc != QPIC_ECC_NONE)
+    {
+        qpic_interleave_page(prog->page.buf, out_raw, data_page_size, spare_size, qpic_ecc);
+    }
+    else
+    {
+        memcpy(out_raw, prog->page.buf, data_page_size);
+        nand_calc_ecc_for_page(out_raw, data_page_size, out_raw + data_page_size, spare_size);
+    }
+}
+
+static bool nand_test_verify_page(np_prog_t *prog, uint32_t page_num, uint32_t seed, const uint8_t *read_raw, uint32_t data_page_size, uint32_t spare_size, qpic_ecc_mode_t qpic_ecc)
+{
+    nand_generate_prbs_page(page_num, seed, prog->page.buf, data_page_size);
+    if (qpic_ecc != QPIC_ECC_NONE)
+    {
+        qpic_interleave_page(prog->page.buf, qpic_raw_buf, data_page_size, spare_size, qpic_ecc);
+        return (memcmp(qpic_raw_buf, read_raw, data_page_size + spare_size) == 0);
+    }
+    else
+    {
+        if (memcmp(prog->page.buf, read_raw, data_page_size) != 0)
+            return false;
+        if (nand_verify_ecc_for_page(read_raw, data_page_size, read_raw + data_page_size, spare_size) != 0)
+            return false;
+        return true;
+    }
+}
 
 static int _np_cmd_nand_test(np_prog_t *prog)
 {
     uint64_t addr, len, total_size, total_len;
     uint32_t page, pages_in_block, data_page_size, spare_size, raw_page_size, block_size;
     np_test_cmd_t *test_cmd;
-    uint8_t mode, mark_bad;
+    uint8_t mode, base_mode, mark_bad;
     uint32_t seed;
+    qpic_ecc_mode_t qpic_ecc;
 
     if (prog->rx_buf_len < sizeof(np_test_cmd_t))
     {
@@ -783,6 +823,9 @@ static int _np_cmd_nand_test(np_prog_t *prog)
     total_len = len = test_cmd->len;
     addr = test_cmd->addr;
     mode = test_cmd->mode;
+    base_mode = mode & 0x0F;
+    uint8_t qpic_opt = (mode >> 4) & 0x03;
+    qpic_ecc = (qpic_opt == 2) ? QPIC_ECC_BCH8 : ((qpic_opt == 1) ? QPIC_ECC_BCH4 : QPIC_ECC_NONE);
     mark_bad = test_cmd->mark_bad;
     seed = test_cmd->seed ? test_cmd->seed : 0xA5A55A5AU;
 
@@ -809,7 +852,7 @@ static int _np_cmd_nand_test(np_prog_t *prog)
         return NP_ERR_ADDR_EXCEEDED;
     }
 
-    if (mode == NP_TEST_MODE_FULL_CHIP)
+    if (base_mode == NP_TEST_MODE_FULL_CHIP)
     {
         /* Mode: Full-disk RDT spanning (Phase 1: Write all blocks -> Phase 2: Verify all blocks) */
         uint64_t cur_addr = addr;
@@ -835,10 +878,9 @@ static int _np_cmd_nand_test(np_prog_t *prog)
                 for (uint32_t p = 0; p < pages_in_block; p++)
                 {
                     uint32_t page_num = block_start_page + p;
-                    nand_generate_prbs_page(page_num, seed, prog->page.buf, data_page_size);
-                    nand_calc_ecc_for_page(prog->page.buf, data_page_size, prog->page.buf + data_page_size, spare_size);
+                    nand_test_prepare_page(prog, page_num, seed, test_write_buf, data_page_size, spare_size, qpic_ecc);
 
-                    hal[prog->hal]->write_page_async(prog->page.buf, page_num, raw_page_size);
+                    hal[prog->hal]->write_page_async(test_write_buf, page_num, raw_page_size);
                     prog->nand_wr_in_progress = 1;
                     while (prog->nand_wr_in_progress)
                     {
@@ -879,14 +921,8 @@ static int _np_cmd_nand_test(np_prog_t *prog)
             {
                 uint32_t page_num = block_start_page + p;
                 hal[prog->hal]->read_page(test_read_buf, page_num, raw_page_size);
-                nand_generate_prbs_page(page_num, seed, prog->page.buf, data_page_size);
 
-                if (memcmp(prog->page.buf, test_read_buf, data_page_size) != 0)
-                {
-                    block_bad = true;
-                    break;
-                }
-                if (nand_verify_ecc_for_page(test_read_buf, data_page_size, test_read_buf + data_page_size, spare_size) != 0)
+                if (!nand_test_verify_page(prog, page_num, seed, test_read_buf, data_page_size, spare_size, qpic_ecc))
                 {
                     block_bad = true;
                     break;
@@ -921,7 +957,7 @@ static int _np_cmd_nand_test(np_prog_t *prog)
             bool block_bad = false;
 
             // Phase 1: Erase block if Full-Block or Write-Only mode
-            if (mode == NP_TEST_MODE_FULL_BLOCK || mode == NP_TEST_MODE_WRITE_ONLY)
+            if (base_mode == NP_TEST_MODE_FULL_BLOCK || base_mode == NP_TEST_MODE_WRITE_ONLY)
             {
                 if (np_nand_erase(prog, block_start_page))
                 {
@@ -933,15 +969,14 @@ static int _np_cmd_nand_test(np_prog_t *prog)
             }
 
             // Phase 2: Write PRBS random data + ECC if Full-Block or Write-Only mode
-            if (!block_bad && (mode == NP_TEST_MODE_FULL_BLOCK || mode == NP_TEST_MODE_WRITE_ONLY))
+            if (!block_bad && (base_mode == NP_TEST_MODE_FULL_BLOCK || base_mode == NP_TEST_MODE_WRITE_ONLY))
             {
                 for (uint32_t p = 0; p < pages_in_block; p++)
                 {
                     uint32_t cur_page = block_start_page + p;
-                    nand_generate_prbs_page(cur_page, seed, prog->page.buf, data_page_size);
-                    nand_calc_ecc_for_page(prog->page.buf, data_page_size, prog->page.buf + data_page_size, spare_size);
+                    nand_test_prepare_page(prog, cur_page, seed, test_write_buf, data_page_size, spare_size, qpic_ecc);
 
-                    hal[prog->hal]->write_page_async(prog->page.buf, cur_page, raw_page_size);
+                    hal[prog->hal]->write_page_async(test_write_buf, cur_page, raw_page_size);
                     prog->nand_wr_in_progress = 1;
                     while (prog->nand_wr_in_progress)
                     {
@@ -963,22 +998,14 @@ static int _np_cmd_nand_test(np_prog_t *prog)
             }
 
             // Phase 3: Read back and verify PRBS + ECC if Full-Block or Verify-Only mode
-            if (!block_bad && (mode == NP_TEST_MODE_FULL_BLOCK || mode == NP_TEST_MODE_VERIFY_ONLY))
+            if (!block_bad && (base_mode == NP_TEST_MODE_FULL_BLOCK || base_mode == NP_TEST_MODE_VERIFY_ONLY))
             {
                 for (uint32_t p = 0; p < pages_in_block; p++)
                 {
                     uint32_t cur_page = block_start_page + p;
                     hal[prog->hal]->read_page(test_read_buf, cur_page, raw_page_size);
-                    nand_generate_prbs_page(cur_page, seed, prog->page.buf, data_page_size);
 
-                    // Verify data
-                    if (memcmp(prog->page.buf, test_read_buf, data_page_size) != 0)
-                    {
-                        block_bad = true;
-                        break;
-                    }
-                    // Verify ECC parity
-                    if (nand_verify_ecc_for_page(test_read_buf, data_page_size, test_read_buf + data_page_size, spare_size) != 0)
+                    if (!nand_test_verify_page(prog, cur_page, seed, test_read_buf, data_page_size, spare_size, qpic_ecc))
                     {
                         block_bad = true;
                         break;
@@ -990,7 +1017,7 @@ static int _np_cmd_nand_test(np_prog_t *prog)
                         nand_re_mark_bad_block(prog, block_start_page);
                     np_send_bad_block_info(addr, block_size, false);
                 }
-                else if (mode == NP_TEST_MODE_FULL_BLOCK)
+                else if (base_mode == NP_TEST_MODE_FULL_BLOCK)
                 {
                     // Clean erase on success in FULL_BLOCK mode
                     np_nand_erase(prog, block_start_page);
@@ -1053,7 +1080,14 @@ static int np_cmd_nand_write_start(np_prog_t *prog)
     DEBUG_PRINT("Write at 0x%llx 0x%llx" " bytes command\r\n",
         (unsigned long long)addr, (unsigned long long)len);
 
-    if (write_start_cmd->flags.inc_spare)
+    if (write_start_cmd->flags.qpic_bch8)
+        prog->qpic_ecc = QPIC_ECC_BCH8;
+    else if (write_start_cmd->flags.qpic_bch4)
+        prog->qpic_ecc = QPIC_ECC_BCH4;
+    else
+        prog->qpic_ecc = QPIC_ECC_NONE;
+
+    if (write_start_cmd->flags.inc_spare && prog->qpic_ecc == QPIC_ECC_NONE)
     {
         pages = prog->chip_info.total_size / prog->chip_info.page_size;
         pages_in_block = prog->chip_info.block_size /
@@ -1172,8 +1206,17 @@ static int np_nand_write(np_prog_t *prog)
     DEBUG_PRINT("NAND write at 0x%llx" " %lu bytes\r\n", (unsigned long long)prog->addr,
         prog->page_size);
 
-    hal[prog->hal]->write_page_async(prog->page.buf, prog->page.page,
-        prog->page_size);
+    if (prog->qpic_ecc != QPIC_ECC_NONE)
+    {
+        uint32_t raw_page_size = prog->chip_info.page_size + prog->chip_info.spare_size;
+        qpic_interleave_page(prog->page.buf, qpic_raw_buf, prog->chip_info.page_size, prog->chip_info.spare_size, (qpic_ecc_mode_t)prog->qpic_ecc);
+        hal[prog->hal]->write_page_async(qpic_raw_buf, prog->page.page, raw_page_size);
+    }
+    else
+    {
+        hal[prog->hal]->write_page_async(prog->page.buf, prog->page.page,
+            prog->page_size);
+    }
 
     prog->nand_wr_in_progress = 1;
 
@@ -1374,10 +1417,16 @@ static int _np_cmd_nand_read(np_prog_t *prog)
     skip_bb = read_cmd->flags.skip_bb;
     inc_spare = read_cmd->flags.inc_spare;
 
+    qpic_ecc_mode_t qpic_ecc = QPIC_ECC_NONE;
+    if (read_cmd->flags.qpic_bch8)
+        qpic_ecc = QPIC_ECC_BCH8;
+    else if (read_cmd->flags.qpic_bch4)
+        qpic_ecc = QPIC_ECC_BCH4;
+
     DEBUG_PRINT("Read at 0x%llx 0x%llx" " bytes command\r\n", (unsigned long long)addr,
         len);
 
-    if (inc_spare)
+    if (inc_spare && qpic_ecc == QPIC_ECC_NONE)
     {
         pages = prog->chip_info.total_size / prog->chip_info.page_size;
         pages_in_block = prog->chip_info.block_size /
@@ -1454,8 +1503,27 @@ static int _np_cmd_nand_read(np_prog_t *prog)
             continue;
         }
 
-        if (np_nand_read(addr, &page, page_size, block_size, prog))
-            return NP_ERR_NAND_RD;
+        if (qpic_ecc != QPIC_ECC_NONE)
+        {
+            uint32_t raw_page_size = prog->chip_info.page_size + prog->chip_info.spare_size;
+            uint32_t status = hal[prog->hal]->read_page(qpic_raw_buf, page.page, raw_page_size);
+            if (status == FLASH_STATUS_ERROR)
+            {
+                if (np_send_bad_block_info(addr, block_size, false))
+                    return -1;
+            }
+            else if (status != FLASH_STATUS_READY)
+            {
+                ERROR_PRINT("NAND read timeout or error at 0x%llx\r\n", (unsigned long long)addr);
+                return NP_ERR_NAND_RD;
+            }
+            qpic_deinterleave_page(qpic_raw_buf, page.buf, prog->chip_info.page_size, prog->chip_info.spare_size, qpic_ecc);
+        }
+        else
+        {
+            if (np_nand_read(addr, &page, page_size, block_size, prog))
+                return NP_ERR_NAND_RD;
+        }
 
         while (page.offset < page_size && len)
         {
@@ -2022,6 +2090,7 @@ static void np_nand_handler(np_prog_t *prog)
 void np_init()
 {
     prog.active_image = 0xff;
+    qpic_init();
 }
 
 void np_handler()

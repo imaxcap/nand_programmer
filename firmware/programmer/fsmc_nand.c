@@ -538,16 +538,27 @@ int fsmc_nand_read_onfi(onfi_param_page_t *onfi_out)
 {
     uint8_t *dst = (uint8_t *)onfi_out;
 
+    if (fsmc_conf.setup_time == 0)
+    {
+        fsmc_conf.setup_time = 20;
+        fsmc_conf.wait_setup_time = 20;
+        fsmc_conf.hold_setup_time = 20;
+        fsmc_conf.hi_z_setup_time = 20;
+        fsmc_conf.clr_setup_time = 10;
+        fsmc_conf.ar_setup_time = 10;
+    }
+
     nand_gpio_init();
     nand_fsmc_init();
 
+    /* ONFI Read Parameter Page: Command 0xEC -> Address 0x00 */
     *(__IO uint8_t *)(Bank_NAND_ADDR | CMD_AREA) = 0xEC;
     *(__IO uint8_t *)(Bank_NAND_ADDR | ADDR_AREA) = 0x00;
 
-    for (volatile int i = 0; i < 2000; i++);
-    while (nand_get_status() == FLASH_STATUS_BUSY);
+    /* Wait tR (~25us..50us max). 12000 loop cycles on 72MHz STM32 is ~150us */
+    for (volatile int i = 0; i < 12000; i++);
 
-    /* Read first copy (256 bytes) */
+    /* Read first copy (256 bytes) directly from DATA_AREA (do NOT send 0x70!) */
     for (int i = 0; i < 256; i++)
     {
         dst[i] = *(__IO uint8_t *)(Bank_NAND_ADDR | DATA_AREA);
@@ -577,4 +588,5 @@ int fsmc_nand_read_onfi(onfi_param_page_t *onfi_out)
 
     return 0;
 }
+
 

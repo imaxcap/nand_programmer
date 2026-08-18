@@ -35,6 +35,7 @@ public:
     const Chip &first() const;
     const Chip *find_by_name(const std::string &name) const;
     const Chip *find_by_id(const protocol::ChipId &id) const;
+    bool empty() const noexcept { return chips_.empty(); }
     const std::vector<Chip> &chips() const noexcept { return chips_; }
 
 private:

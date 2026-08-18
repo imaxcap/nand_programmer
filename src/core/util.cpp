@@ -103,7 +103,7 @@ std::filesystem::path find_database(const std::filesystem::path &requested,
         if (std::filesystem::is_regular_file(candidate))
             return candidate;
     }
-    throw Error("Could not find nando_parallel_chip_db.csv; use --db PATH");
+    return {};
 }
 
 namespace {

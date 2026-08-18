@@ -100,6 +100,16 @@ void test_protocol_encoding() {
             "range length must be little endian");
     require(range[17] == 2, "raw flags must only set include-spare");
 
+    nandprog::protocol::Flags qpic_bch4_flags;
+    qpic_bch4_flags.skip_bad = true;
+    qpic_bch4_flags.qpic_bch4 = true;
+    require(qpic_bch4_flags.encode() == (1 | 8), "qpic bch4 flags bitmask");
+
+    nandprog::protocol::Flags qpic_bch8_flags;
+    qpic_bch8_flags.skip_bad = true;
+    qpic_bch8_flags.qpic_bch8 = true;
+    require(qpic_bch8_flags.encode() == (1 | 16), "qpic bch8 flags bitmask");
+
     const auto scrub_packet = nandprog::protocol::encode_scrub(0x0, 0x8000000);
     require(scrub_packet.size() == 17, "scrub packet size");
     require(scrub_packet[0] == 0x10, "scrub opcode 0x10");

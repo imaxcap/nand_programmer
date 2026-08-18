@@ -7,7 +7,7 @@ on:
 
 jobs:
   build-firmware:
-    name: Build STM32 Firmware (v3.6.0)
+    name: Build STM32 Firmware (v3.7.1)
     runs-on: ubuntu-latest
 
     steps:
@@ -17,7 +17,7 @@ jobs:
       - name: Install ARM GCC Toolchain
         run: |
           sudo apt-get update
-          sudo apt-get install -y gcc-arm-none-eabi libnewlib-arm-none-eabi
+          sudo apt-get install --no-install-recommends -y gcc-arm-none-eabi libnewlib-arm-none-eabi
 
       - name: Verify Toolchain
         run: |
@@ -36,7 +36,7 @@ jobs:
       - name: Upload Firmware Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: nando-stm32-firmware-v3.6.0
+          name: nando-stm32-firmware-v3.7.1
           path: |
             firmware/obj/nando_fw.bin
             firmware/obj/nando_fw.hex

@@ -38,7 +38,9 @@ std::size_t status_payload_size(std::uint8_t info) {
 std::uint8_t Flags::encode() const noexcept {
     return static_cast<std::uint8_t>((skip_bad ? 1U : 0U) |
                                      (include_spare ? 2U : 0U) |
-                                     (enable_hardware_ecc ? 4U : 0U));
+                                     (enable_hardware_ecc ? 4U : 0U) |
+                                     (qpic_bch4 ? 8U : 0U) |
+                                     (qpic_bch8 ? 16U : 0U));
 }
 
 std::vector<std::uint8_t> encode_simple(Command command) {

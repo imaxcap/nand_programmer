@@ -49,6 +49,8 @@ struct Flags {
     bool skip_bad = false;
     bool include_spare = false;
     bool enable_hardware_ecc = false;
+    bool qpic_bch4 = false;
+    bool qpic_bch8 = false;
 
     std::uint8_t encode() const noexcept;
 };
